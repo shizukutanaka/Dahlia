@@ -355,16 +355,20 @@ impl Db {
         let face_ids = self.identity_face_ids(identity_id)?;
         let mut out = Vec::new();
         for fid in face_ids {
-            let conn = self.conn.lock().unwrap();
-            let face = conn.query_row(
-                "SELECT id, asset_id, bbox, confidence FROM faces WHERE id = ?1",
-                params![fid],
-                |r| {
-                    let bbox_s: String = r.get(2)?;
-                    let bbox: [f32; 4] = serde_json::from_str(&bbox_s).unwrap_or([0.0; 4]);
-                    Ok(Face { id: r.get(0)?, asset_id: r.get(1)?, bbox, confidence: r.get(3)? })
-                },
-            );
+            // Scope the lock: get_asset() below locks the same Mutex,
+            // so holding this guard across the call self-deadlocks.
+            let face = {
+                let conn = self.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT id, asset_id, bbox, confidence FROM faces WHERE id = ?1",
+                    params![fid],
+                    |r| {
+                        let bbox_s: String = r.get(2)?;
+                        let bbox: [f32; 4] = serde_json::from_str(&bbox_s).unwrap_or([0.0; 4]);
+                        Ok(Face { id: r.get(0)?, asset_id: r.get(1)?, bbox, confidence: r.get(3)? })
+                    },
+                )
+            };
             if let Ok(face) = face {
                 let asset = self.get_asset(face.asset_id)?;
                 out.push((face, asset));

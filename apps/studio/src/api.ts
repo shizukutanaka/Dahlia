@@ -72,7 +72,25 @@ export const api = {
     invoke<IdentityDetail>("identity_detail", { identityId }),
   renameIdentity: (identityId: number, name: string) =>
     invoke<void>("rename_identity", { identityId, name }),
+  identitySpace: (projectId: number) =>
+    invoke<SpaceData>("identity_space", { projectId }),
+  faceDepth: (faceId: number) => invoke<string>("face_depth", { faceId }),
 };
+
+export interface SpacePoint {
+  face_id: number;
+  identity_id: number | null;
+  pos: [number, number, number];
+  confidence: number;
+  asset_path: string;
+  crop_path: string;
+}
+
+export interface SpaceData {
+  points: SpacePoint[];
+  identities: Identity[];
+  method: string;
+}
 
 export async function pickFolder(): Promise<string | null> {
   const picked = await open({ directory: true, multiple: false });

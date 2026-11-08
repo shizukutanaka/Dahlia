@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import {
   api,
   baseName,
@@ -9,12 +9,14 @@ import {
   type IdentityDetail,
   type Project,
 } from "./api";
+const Space3D = lazy(() => import("./Space3D"));
 import "./App.css";
 
 type View =
   | { kind: "projects" }
   | { kind: "project"; project: Project }
-  | { kind: "identity"; project: Project; identityId: number };
+  | { kind: "identity"; project: Project; identityId: number }
+  | { kind: "space"; project: Project };
 
 function App() {
   const [view, setView] = useState<View>({ kind: "projects" });
@@ -45,7 +47,16 @@ function App() {
           onOpenIdentity={(id) =>
             setView({ kind: "identity", project: view.project, identityId: id })
           }
+          onOpenSpace={() => setView({ kind: "space", project: view.project })}
         />
+      )}
+      {view.kind === "space" && (
+        <Suspense fallback={<p className="hint">3D空間を読み込み中…</p>}>
+          <Space3D
+            project={view.project}
+            onBack={() => setView({ kind: "project", project: view.project })}
+          />
+        </Suspense>
       )}
       {view.kind === "identity" && (
         <IdentityView
@@ -115,10 +126,12 @@ function ProjectView({
   project,
   onBack,
   onOpenIdentity,
+  onOpenSpace,
 }: {
   project: Project;
   onBack: () => void;
   onOpenIdentity: (id: number) => void;
+  onOpenSpace: () => void;
 }) {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [identities, setIdentities] = useState<Identity[]>([]);
@@ -239,7 +252,14 @@ function ProjectView({
       </section>
 
       <section>
-        <h3>人物 Identity（{identities.length}人）</h3>
+        <h3>
+          人物 Identity（{identities.length}人）
+          {identities.length > 0 && (
+            <button className="s3-open" onClick={onOpenSpace} style={{ marginLeft: 12 }}>
+              🧊 3D空間で見る
+            </button>
+          )}
+        </h3>
         {identities.length === 0 ? (
           <p className="hint">
             まだ人物が登録されていません。写真を読み込み → 顔を検出 → 特徴量を取得 → 人物を分類、の順に進めてください。

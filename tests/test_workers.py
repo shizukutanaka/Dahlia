@@ -75,3 +75,35 @@ class FaceWorkerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+sys.path.insert(0, str(ROOT / "workers" / "space"))
+space_worker = _load("space_worker", ROOT / "workers" / "space" / "worker.py")
+
+
+class SpaceWorkerTest(unittest.TestCase):
+    def test_pca_keeps_clusters_separate(self):
+        rng = np.random.default_rng(7)
+        items = []
+        base_a = np.zeros(16); base_a[0] = 1.0
+        base_b = np.zeros(16); base_b[2] = 1.0
+        for i in range(6):  # cluster A around e0
+            v = base_a + rng.normal(0, 0.03, 16)
+            items.append({"face_id": 100 + i, "vector": v.tolist()})
+        for i in range(6):  # cluster B around e2
+            v = base_b + rng.normal(0, 0.03, 16)
+            items.append({"face_id": 200 + i, "vector": v.tolist()})
+        r = space_worker.handle({"items": items, "method": "pca"})
+        self.assertEqual(r["method"], "pca")
+        pos = {p["face_id"]: np.array(p["pos"]) for p in r["points"]}
+        self.assertEqual(len(pos), 12)
+        ca = np.mean([pos[100 + i] for i in range(6)], axis=0)
+        cb = np.mean([pos[200 + i] for i in range(6)], axis=0)
+        within = max(np.linalg.norm(pos[100 + i] - ca) for i in range(6))
+        between = np.linalg.norm(ca - cb)
+        self.assertGreater(between, within * 3)
+
+    def test_umap_falls_back_below_20_points(self):
+        items = [{"face_id": i, "vector": unit([1.0, i * 0.01, 0.0])} for i in range(5)]
+        r = space_worker.handle({"items": items, "method": "umap"})
+        self.assertEqual(r["method"], "pca")
