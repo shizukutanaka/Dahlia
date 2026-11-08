@@ -15,3 +15,6 @@ Rust Core からサブプロセスとして起動される Python ワーカー�
               (Depth Anything V2, 任意)。内蔵3D空間ビュー用。
               深度モデルは <repo>/models/depth-anything-v2-small.onnx
               または環境変数 DAHLIA_DEPTH_MODEL で指定。
+              facemesh は mediapipe (Tasks API) と scipy が必要:
+              pip install mediapipe scipy
+              (Linux では libEGL/libGL のシステムライブラリも必要)
