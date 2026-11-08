@@ -74,7 +74,16 @@ def triangulate(pts2d: np.ndarray) -> list[list[int]]:
 
 
 def handle(req: dict) -> dict:
-    import mediapipe as mp
+    try:
+        import mediapipe as mp
+        import scipy  # noqa: F401
+    except ImportError:
+        # The lean portable package ships without the optional
+        # facemesh component; fail with an explanation, not a traceback.
+        raise RuntimeError(
+            "3D顔プレビュー用コンポーネント（mediapipe）が未導入のため、"
+            "この機能は現在のパッケージでは使えません"
+        )
 
     image_path = req["image"]
     landmarker = _get_landmarker()
