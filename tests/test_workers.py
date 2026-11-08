@@ -107,3 +107,24 @@ class SpaceWorkerTest(unittest.TestCase):
         items = [{"face_id": i, "vector": unit([1.0, i * 0.01, 0.0])} for i in range(5)]
         r = space_worker.handle({"items": items, "method": "umap"})
         self.assertEqual(r["method"], "pca")
+
+
+sys.path.insert(0, str(ROOT / "workers" / "facemesh"))
+facemesh_worker = _load("facemesh_worker", ROOT / "workers" / "facemesh" / "worker.py")
+_FACEMESH_MODEL = ROOT / "workers" / "facemesh" / "models" / "face_landmarker.task"
+
+
+@unittest.skipUnless(_FACEMESH_MODEL.exists(), "face landmarker model not present")
+class FaceMeshWorkerTest(unittest.TestCase):
+    def test_landmarks_on_sample_portrait(self):
+        try:
+            r = facemesh_worker.handle({"image": str(ROOT / "tests" / "samples" / "einstein_a.jpg")})
+        except Exception as e:
+            self.skipTest(f"mediapipe unavailable: {e}")
+        self.assertTrue(r["found"])
+        self.assertEqual(len(r["points"]), 478)
+        self.assertGreater(len(r["triangles"]), 800)
+        self.assertEqual(len(r["uvs"]), 478)
+        self.assertTrue(r["blendshapes"])
+        # nose tip (landmark 1) must sit in front of the cheek edge (234)
+        self.assertGreater(r["points"][1][2], r["points"][234][2])

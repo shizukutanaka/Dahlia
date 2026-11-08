@@ -75,6 +75,8 @@ export const api = {
   identitySpace: (projectId: number) =>
     invoke<SpaceData>("identity_space", { projectId }),
   faceDepth: (faceId: number) => invoke<string>("face_depth", { faceId }),
+  identityFaceMesh: (identityId: number) =>
+    invoke<FaceMeshData>("identity_face_mesh", { identityId }),
 };
 
 export interface SpacePoint {
@@ -90,6 +92,15 @@ export interface SpaceData {
   points: SpacePoint[];
   identities: Identity[];
   method: string;
+}
+
+export interface FaceMeshData {
+  face_id: number;
+  crop_path: string;
+  points: [number, number, number][];
+  uvs: [number, number][];
+  triangles: [number, number, number][];
+  blendshapes: [string, number][];
 }
 
 export async function pickFolder(): Promise<string | null> {

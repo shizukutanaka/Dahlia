@@ -1,0 +1,21 @@
+.fm-wrap { display: flex; gap: 12px; margin: 12px 0; }
+.fm-stage { flex: 1; position: relative; min-width: 0; }
+.fm-mount {
+  width: 100%; height: 430px; border-radius: 10px; overflow: hidden; background: #14151c;
+}
+.fm-mount canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+.fm-toggle {
+  position: absolute; top: 10px; right: 10px; background: rgba(12, 12, 18, .85);
+  color: #fff; padding: 6px 10px; border-radius: 7px; font-size: 12.5px;
+  display: flex; gap: 6px; align-items: center; cursor: pointer;
+}
+.fm-side {
+  width: 240px; flex-shrink: 0; background: #fff; border: 1px solid #e5e0da;
+  border-radius: 10px; padding: 12px;
+}
+.fm-side h4 { margin: 2px 0 10px; font-size: 13px; color: #777; }
+.fm-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; font-size: 11.5px; }
+.fm-bar-name { width: 108px; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fm-bar { flex: 1; height: 8px; background: #f0ebe6; border-radius: 4px; overflow: hidden; }
+.fm-bar > div { height: 100%; background: #b23a6d; border-radius: 4px; }
+.fm-bar-val { width: 34px; text-align: right; color: #999; }

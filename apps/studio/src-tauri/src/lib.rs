@@ -3,6 +3,7 @@
 //! All data and AI work goes through dahlia-core (storage / jobs);
 //! the frontend only ever calls the commands defined here.
 
+pub mod facemesh;
 pub mod import;
 pub mod pipeline;
 pub mod space;
@@ -188,6 +189,21 @@ async fn face_depth(state: State<'_, AppState>, face_id: i64) -> Result<String, 
 }
 
 #[tauri::command]
+async fn identity_face_mesh(
+    state: State<'_, AppState>,
+    identity_id: i64,
+) -> Result<facemesh::FaceMeshData, String> {
+    let db = state.db.clone();
+    let workers = state.workers.clone();
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        facemesh::identity_face_mesh(&db, &workers, &data_dir, identity_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn rename_identity(state: State<'_, AppState>, identity_id: i64, name: String) -> Result<(), String> {
     to_err(state.db.rename_identity(identity_id, &name))
 }
@@ -218,7 +234,8 @@ pub fn run() {
             identity_detail,
             rename_identity,
             identity_space,
-            face_depth
+            face_depth,
+            identity_face_mesh
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

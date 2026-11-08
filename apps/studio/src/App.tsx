@@ -10,6 +10,7 @@ import {
   type Project,
 } from "./api";
 const Space3D = lazy(() => import("./Space3D"));
+const FaceMesh3D = lazy(() => import("./FaceMesh3D"));
 import "./App.css";
 
 type View =
@@ -283,6 +284,7 @@ function ProjectView({
 
 function IdentityView({ identityId, onBack }: { identityId: number; onBack: () => void }) {
   const [detail, setDetail] = useState<IdentityDetail | null>(null);
+  const [showMesh, setShowMesh] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
 
@@ -324,6 +326,19 @@ function IdentityView({ identityId, onBack }: { identityId: number; onBack: () =
           顔 {detail.identity.face_count} 件 / 品質スコア {detail.identity.quality_score.toFixed(2)}
         </span>
       </div>
+      <section>
+        <h3>
+          3D顔プレビュー
+          <button onClick={() => setShowMesh(!showMesh)} style={{ marginLeft: 12 }}>
+            {showMesh ? "閉じる" : "🧑 3Dで見る"}
+          </button>
+        </h3>
+        {showMesh && (
+          <Suspense fallback={<p className="hint">3Dプレビューを読み込み中…</p>}>
+            <FaceMesh3D identityId={identityId} />
+          </Suspense>
+        )}
+      </section>
       <div className="grid">
         {detail.faces.map(({ face, crop_path, asset_path }) => (
           <figure key={face.id} className="thumb">
