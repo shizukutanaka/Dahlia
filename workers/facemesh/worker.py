@@ -5,7 +5,7 @@ crop, for Dahlia's built-in 3D face preview.
 Request : {"image": "<face crop jpg/png>"}
 Response: {"found": true,
            "points": [[x, y, z], ...],        # 478 landmarks, centred
-           "triangles": [[a, b, c], ...],     # Delaunay, long edges cut
+           "triangles": [[a, b, c], ...],     # canonical face tessellation
            "blendshapes": {"jawOpen": 0.12, ...}}
           {"found": false} when no face is detected.
 
@@ -55,28 +55,99 @@ def _get_landmarker():
     return _landmarker
 
 
-def triangulate(pts2d: np.ndarray) -> list[list[int]]:
-    """Delaunay over the 2D landmarks; drop triangles with any long
-    edge (they would stretch across the silhouette/background)."""
-    from scipy.spatial import Delaunay
+_triangles = None
 
-    tris = Delaunay(pts2d).simplices
-    out = []
-    for a, b, c in tris:
-        edges = [
-            np.linalg.norm(pts2d[a] - pts2d[b]),
-            np.linalg.norm(pts2d[b] - pts2d[c]),
-            np.linalg.norm(pts2d[c] - pts2d[a]),
-        ]
-        if max(edges) < 0.16:
-            out.append([int(a), int(b), int(c)])
-    return out
+
+def triangulate(pts: np.ndarray) -> list[list[int]]:
+    """Canonical MediaPipe face-mesh triangulation (tessellation.json,
+    derived from FACEMESH_TESSELATION, Apache-2.0). Designed topology
+    beats a geometric Delaunay here: no facets stretch across the
+    mouth/eye openings, and there is no scipy dependency. Indices
+    cover the 468-point mesh; iris points (468+) stay untriangulated.
+    The tessellation edges are undirected, so each triangle is wound
+    to face away from the landmark centroid -- without this the mesh
+    shades like crumpled foil."""
+    global _triangles
+    if _triangles is None:
+        import json
+
+        path = Path(__file__).resolve().parent / "tessellation.json"
+        _triangles = json.loads(path.read_text(encoding="utf-8"))["triangles"]
+    tris = [list(t) for t in _triangles if max(t) < len(pts)]
+    _orient_consistently(tris, pts)
+    return [[int(a), int(b), int(c)] for a, b, c in tris]
+
+
+def _orient_consistently(tris: list, pts: np.ndarray) -> None:
+    """Make all triangle windings consistent in place. Adjacent
+    triangles must traverse their shared edge in opposite directions;
+    propagate that constraint by BFS from a seed, then flip the whole
+    mesh if the majority of normals end up pointing at the centroid.
+    A per-triangle centroid test alone miswinds triangles in concave
+    regions (eye sockets), which shade as dark folded bands."""
+    from collections import defaultdict, deque
+
+    edge_map = defaultdict(list)
+    for i, (a, b, c) in enumerate(tris):
+        for u, v in ((a, b), (b, c), (c, a)):
+            edge_map[(min(u, v), max(u, v))].append(i)
+
+    def directed(tri, key):
+        a, b, c = tri
+        for u, v in ((a, b), (b, c), (c, a)):
+            if (min(u, v), max(u, v)) == key:
+                return (u, v)
+        return None
+
+    centre = pts.mean(axis=0)
+
+    def seed_outward(i):
+        a, b, c = tris[i]
+        n = np.cross(pts[b] - pts[a], pts[c] - pts[a])
+        tc = (pts[a] + pts[b] + pts[c]) / 3.0
+        if float(np.dot(n, tc - centre)) < 0:
+            tris[i] = [a, c, b]
+
+    seen = [False] * len(tris)
+    for start in range(len(tris)):
+        if seen[start]:
+            continue
+        seed_outward(start)
+        seen[start] = True
+        component = [start]
+        queue = deque([start])
+        while queue:
+            i = queue.popleft()
+            for key, others in edge_map.items():
+                if i not in others:
+                    continue
+                for j in others:
+                    if j == i or seen[j]:
+                        continue
+                    if directed(tris[i], key) == directed(tris[j], key):
+                        tris[j] = [tris[j][0], tris[j][2], tris[j][1]]
+                    seen[j] = True
+                    component.append(j)
+                    queue.append(j)
+        # A component can be consistently wound yet globally flipped
+        # (its seed sits in a concavity -- the eye/brow patch did
+        # exactly this and shaded as a dark band). Decide per
+        # component by majority vote of its own triangles.
+        score = 0.0
+        for i in component:
+            a, b, c = tris[i]
+            n = np.cross(pts[b] - pts[a], pts[c] - pts[a])
+            tc = (pts[a] + pts[b] + pts[c]) / 3.0
+            score += float(np.dot(n, tc - centre))
+        if score < 0:
+            for i in component:
+                a, b, c = tris[i]
+                tris[i] = [a, c, b]
 
 
 def handle(req: dict) -> dict:
     try:
         import mediapipe as mp
-        import scipy  # noqa: F401
     except ImportError:
         # The lean portable package ships without the optional
         # facemesh component; fail with an explanation, not a traceback.
@@ -121,7 +192,7 @@ def handle(req: dict) -> dict:
         "found": True,
         "points": [[round(float(v), 4) for v in p] for p in pts],
         "uvs": [[round(float(p[0]), 4), round(1.0 - float(p[1]), 4)] for p in raw],
-        "triangles": triangulate(raw[:, :2]),
+        "triangles": triangulate(pts),
         "blendshapes": blendshapes,
     }
 

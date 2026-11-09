@@ -124,6 +124,32 @@ class FaceMeshWorkerTest(unittest.TestCase):
         self.assertTrue(r["found"])
         self.assertEqual(len(r["points"]), 478)
         self.assertGreater(len(r["triangles"]), 800)
+        # Winding: shared edges must be traversed in opposite
+        # directions by their two triangles (a consistently wound
+        # mesh shades smoothly; per-triangle heuristics do not).
+        # A handful of non-manifold edges in the canonical
+        # tessellation can never satisfy this, hence 0.99 not 1.0.
+        from collections import defaultdict
+
+        edge_dirs = defaultdict(list)
+        for a, b, c in r["triangles"]:
+            for u, v in ((a, b), (b, c), (c, a)):
+                edge_dirs[(min(u, v), max(u, v))].append((u, v))
+        shared = [d for d in edge_dirs.values() if len(d) == 2]
+        consistent = sum(1 for d in shared if d[0] != d[1])
+        self.assertGreater(consistent / len(shared), 0.99)
+        # And the mesh as a whole must face outward, not be globally
+        # flipped (a flipped mesh would score near 0.1 here; the
+        # flat central face makes ~0.85 normal for a correct mesh).
+        pts = np.array(r["points"], dtype=np.float64)
+        centre = pts.mean(axis=0)
+        outward = 0
+        for a, b, c in r["triangles"]:
+            n = np.cross(pts[b] - pts[a], pts[c] - pts[a])
+            tc = (pts[a] + pts[b] + pts[c]) / 3.0
+            if float(np.dot(n, tc - centre)) > 0:
+                outward += 1
+        self.assertGreater(outward / len(r["triangles"]), 0.75)
         self.assertEqual(len(r["uvs"]), 478)
         self.assertTrue(r["blendshapes"])
         # nose tip (landmark 1) must sit in front of the cheek edge (234)
