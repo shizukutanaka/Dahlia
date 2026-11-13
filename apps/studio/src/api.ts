@@ -12,6 +12,17 @@ export interface Asset {
   project_id: number;
   path: string;
   thumbnail: string | null;
+  detected: boolean;
+}
+
+export interface ProcessingFailure {
+  id: number;
+  project_id: number;
+  asset_id: number | null;
+  stage: "import" | "detect" | "embed" | "crop";
+  target: string;
+  message: string;
+  created_at: string;
 }
 
 export interface Face {
@@ -43,26 +54,43 @@ export interface ImportReport {
 
 export const api = {
   dbStatus: () =>
-    invoke<{ ok: boolean; db_path: string; tables: string[]; notice: string | null }>(
-      "db_status",
-    ),
+    invoke<{
+      ok: boolean;
+      db_path: string;
+      tables: string[];
+      notice: string | null;
+      app_version: string;
+      log_path: string | null;
+    }>("db_status"),
   listProjects: () => invoke<Project[]>("list_projects"),
   createProject: (name: string) =>
     invoke<Project>("create_project", { name }),
+  deleteProject: (projectId: number) =>
+    invoke<void>("delete_project", { projectId }),
+  removeAsset: (assetId: number) => invoke<void>("remove_asset", { assetId }),
   importFolder: (projectId: number, folder: string) =>
     invoke<ImportReport>("import_folder", { projectId, folder }),
   listAssets: (projectId: number) =>
     invoke<Asset[]>("list_assets", { projectId }),
   listFaces: (assetId: number) => invoke<Face[]>("list_faces", { assetId }),
   detectFaces: (projectId: number) =>
-    invoke<{ images_processed: number; faces_found: number; failed: number }>(
+    invoke<{ images_processed: number; faces_found: number; failed: number; skipped: number }>(
       "detect_faces",
       { projectId },
     ),
+  redetectFaces: (projectId: number) =>
+    invoke<{ images_processed: number; faces_found: number; failed: number; skipped: number }>(
+      "redetect_faces",
+      { projectId },
+    ),
   generateEmbeddings: (projectId: number) =>
-    invoke<{ embedded: number; failed: number }>("generate_embeddings", {
+    invoke<{ embedded: number; failed: number; skipped: number }>("generate_embeddings", {
       projectId,
     }),
+  listFailures: (projectId: number) =>
+    invoke<ProcessingFailure[]>("list_failures", { projectId }),
+  clearFailures: (projectId: number) =>
+    invoke<void>("clear_failures", { projectId }),
   clusterIdentities: (projectId: number) =>
     invoke<{
       identities: number;
@@ -76,6 +104,10 @@ export const api = {
     invoke<IdentityDetail>("identity_detail", { identityId }),
   renameIdentity: (identityId: number, name: string) =>
     invoke<void>("rename_identity", { identityId, name }),
+  mergeIdentities: (targetId: number, sourceId: number) =>
+    invoke<void>("merge_identities", { targetId, sourceId }),
+  moveFaceToIdentity: (faceId: number, targetIdentityId: number) =>
+    invoke<void>("move_face_to_identity", { faceId, targetIdentityId }),
   identitySpace: (projectId: number) =>
     invoke<SpaceData>("identity_space", { projectId }),
   faceDepth: (faceId: number) => invoke<string>("face_depth", { faceId }),

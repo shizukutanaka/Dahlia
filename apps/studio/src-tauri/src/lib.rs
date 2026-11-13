@@ -3,6 +3,7 @@
 //! All data and AI work goes through dahlia-core (storage / jobs);
 //! the frontend only ever calls the commands defined here.
 
+pub mod errors;
 pub mod facemesh;
 pub mod import;
 pub mod orient;
@@ -33,15 +34,26 @@ impl AppState {
 }
 
 fn to_err<T>(r: dahlia_core::Result<T>) -> Result<T, String> {
-    r.map_err(|e| e.to_string())
+    r.map_err(|e| {
+        let raw = e.to_string();
+        dahlia_core::logging::error(&raw);
+        errors::friendly(&raw)
+    })
+}
+
+/// Same treatment for the String errors of the pipeline modules:
+/// log the raw detail, show the user the Japanese version.
+fn friendly<T>(r: Result<T, String>) -> Result<T, String> {
+    r.map_err(|e| {
+        dahlia_core::logging::error(&e);
+        errors::friendly(&e)
+    })
 }
 
 /// Open an image with its EXIF orientation applied (W86), so Rust-side
 /// pixels agree with what the Python workers see (they apply the same
 /// correction through PIL). Used for thumbnails and face crops.
-pub(crate) fn open_oriented_image(
-    path: &std::path::Path,
-) -> Result<image::DynamicImage, String> {
+pub(crate) fn open_oriented_image(path: &std::path::Path) -> Result<image::DynamicImage, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
     Ok(apply_orientation(img, orient::transform_for_jpeg(&bytes)))
@@ -71,6 +83,11 @@ struct DbStatus {
     tables: Vec<String>,
     /// Set when startup recovered the database from a backup.
     notice: Option<String>,
+    /// App version (single source: this crate's Cargo.toml, kept in
+    /// sync with tauri.conf.json / package.json).
+    app_version: String,
+    /// Where the diagnostic log lives (W12/W13).
+    log_path: Option<String>,
 }
 
 #[tauri::command]
@@ -78,9 +95,15 @@ fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
     let tables = to_err(state.db.table_names())?;
     Ok(DbStatus {
         ok: true,
-        db_path: state.data_dir.join("dahlia.db").to_string_lossy().into_owned(),
+        db_path: state
+            .data_dir
+            .join("dahlia.db")
+            .to_string_lossy()
+            .into_owned(),
         tables,
         notice: state.db.recovery_note().map(|s| s.to_string()),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        log_path: dahlia_core::logging::log_path().map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -102,11 +125,12 @@ async fn import_folder(
 ) -> Result<import::ImportReport, String> {
     let db = state.db.clone();
     let thumbs = state.thumbs_dir();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         import::import_folder(&db, &thumbs, project_id, &PathBuf::from(folder))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    friendly(result)
 }
 
 #[tauri::command]
@@ -127,11 +151,12 @@ async fn detect_faces(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let crops = state.face_crops_dir();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         pipeline::detect_faces(&db, &workers, &crops, project_id)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    friendly(result)
 }
 
 #[tauri::command]
@@ -141,11 +166,12 @@ async fn generate_embeddings(
 ) -> Result<pipeline::EmbedReport, String> {
     let db = state.db.clone();
     let workers = state.workers.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         pipeline::generate_embeddings(&db, &workers, project_id)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    friendly(result)
 }
 
 #[tauri::command]
@@ -155,11 +181,12 @@ async fn cluster_identities(
 ) -> Result<pipeline::ClusterReport, String> {
     let db = state.db.clone();
     let workers = state.workers.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         pipeline::cluster_identities(&db, &workers, project_id)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    friendly(result)
 }
 
 #[tauri::command]
@@ -188,7 +215,10 @@ fn identity_detail(state: State<'_, AppState>, identity_id: i64) -> Result<Ident
     let faces = pairs
         .into_iter()
         .map(|(face, asset)| FaceWithAsset {
-            crop_path: crops.join(format!("{}.jpg", face.id)).to_string_lossy().into_owned(),
+            crop_path: crops
+                .join(format!("{}.jpg", face.id))
+                .to_string_lossy()
+                .into_owned(),
             asset_path: asset.path.clone(),
             face,
         })
@@ -204,20 +234,24 @@ async fn identity_space(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let crops = state.face_crops_dir();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         space::identity_space(&db, &workers, &crops, project_id)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    friendly(result)
 }
 
 #[tauri::command]
 async fn face_depth(state: State<'_, AppState>, face_id: i64) -> Result<String, String> {
     let workers = state.workers.clone();
     let data_dir = state.data_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || space::face_depth(&workers, &data_dir, face_id))
-        .await
-        .map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        space::face_depth(&workers, &data_dir, face_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    friendly(result)
 }
 
 #[tauri::command]
@@ -228,16 +262,101 @@ async fn identity_face_mesh(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let data_dir = state.data_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         facemesh::identity_face_mesh(&db, &workers, &data_dir, identity_id)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    friendly(result)
 }
 
 #[tauri::command]
-fn rename_identity(state: State<'_, AppState>, identity_id: i64, name: String) -> Result<(), String> {
+fn rename_identity(
+    state: State<'_, AppState>,
+    identity_id: i64,
+    name: String,
+) -> Result<(), String> {
     to_err(state.db.rename_identity(identity_id, &name))
+}
+
+#[tauri::command]
+async fn redetect_faces(
+    state: State<'_, AppState>,
+    project_id: i64,
+) -> Result<pipeline::DetectReport, String> {
+    let db = state.db.clone();
+    let workers = state.workers.clone();
+    let crops = state.face_crops_dir();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        pipeline::redetect_faces(&db, &workers, &crops, project_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    friendly(result)
+}
+
+#[tauri::command]
+fn list_failures(
+    state: State<'_, AppState>,
+    project_id: i64,
+) -> Result<Vec<dahlia_core::storage::ProcessingFailure>, String> {
+    to_err(state.db.list_failures(project_id))
+}
+
+#[tauri::command]
+fn clear_failures(state: State<'_, AppState>, project_id: i64) -> Result<(), String> {
+    to_err(state.db.clear_failures(project_id))
+}
+
+/// Delete a project and its registrations. Generated files
+/// (thumbnails, face crops) are removed; the user's original
+/// photo files are never touched.
+#[tauri::command]
+fn delete_project(state: State<'_, AppState>, project_id: i64) -> Result<(), String> {
+    let artifacts = to_err(state.db.project_artifacts(project_id))?;
+    to_err(state.db.delete_project(project_id))?;
+    for thumb in &artifacts.thumbnails {
+        let _ = std::fs::remove_file(thumb);
+    }
+    let crops = state.face_crops_dir();
+    for face_id in &artifacts.face_ids {
+        let _ = std::fs::remove_file(crops.join(format!("{face_id}.jpg")));
+    }
+    dahlia_core::logging::info(&format!("プロジェクト {project_id} を削除しました"));
+    Ok(())
+}
+
+/// Remove one photo's registration (faces/embeddings/links go with
+/// it). The original file stays on disk.
+#[tauri::command]
+fn remove_asset(state: State<'_, AppState>, asset_id: i64) -> Result<(), String> {
+    let removed = to_err(state.db.remove_asset(asset_id))?;
+    if let Some(thumb) = &removed.thumbnail {
+        let _ = std::fs::remove_file(thumb);
+    }
+    let crops = state.face_crops_dir();
+    for face_id in &removed.face_ids {
+        let _ = std::fs::remove_file(crops.join(format!("{face_id}.jpg")));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn merge_identities(
+    state: State<'_, AppState>,
+    target_id: i64,
+    source_id: i64,
+) -> Result<(), String> {
+    to_err(state.db.merge_identities(target_id, source_id))
+}
+
+#[tauri::command]
+fn move_face_to_identity(
+    state: State<'_, AppState>,
+    face_id: i64,
+    target_identity_id: i64,
+) -> Result<(), String> {
+    to_err(state.db.move_face_to_identity(face_id, target_identity_id))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -247,9 +366,19 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            // Diagnostic log (local file only, never sent anywhere).
+            dahlia_core::logging::init(&data_dir.join("logs").join("dahlia.log"));
+            dahlia_core::logging::info("Dahlia を起動しました");
             let db = Db::open(&data_dir.join("dahlia.db"))?;
+            if let Some(note) = db.recovery_note() {
+                dahlia_core::logging::warn(note);
+            }
             let workers = WorkerConfig::locate();
-            app.manage(AppState { db: Arc::new(db), data_dir, workers });
+            app.manage(AppState {
+                db: Arc::new(db),
+                data_dir,
+                workers,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -265,6 +394,13 @@ pub fn run() {
             list_identities,
             identity_detail,
             rename_identity,
+            redetect_faces,
+            list_failures,
+            clear_failures,
+            delete_project,
+            remove_asset,
+            merge_identities,
+            move_face_to_identity,
             identity_space,
             face_depth,
             identity_face_mesh

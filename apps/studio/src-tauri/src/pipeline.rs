@@ -10,11 +10,11 @@
 
 use std::path::Path;
 
-use dahlia_core::identity::{cosine, match_previous, PreviousIdentity};
+use dahlia_core::identity::{PreviousIdentity, cosine, match_previous};
 use dahlia_core::jobs::{WorkerConfig, WorkerSession};
 use dahlia_core::storage::{Db, ReconciledIdentity};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub const EMBED_MODEL: &str = "arcface-mbf";
 const CLUSTER_EPS: f64 = 0.68; // cosine distance; tuned on tests/samples
@@ -24,12 +24,16 @@ pub struct DetectReport {
     pub images_processed: usize,
     pub faces_found: usize,
     pub failed: usize,
+    /// Assets left alone because detection already ran for them.
+    pub skipped: usize,
 }
 
 #[derive(Serialize)]
 pub struct EmbedReport {
     pub embedded: usize,
     pub failed: usize,
+    /// Faces that already had an embedding and were not redone.
+    pub skipped: usize,
 }
 
 #[derive(Serialize)]
@@ -55,7 +59,9 @@ fn faces_from(resp: &Value) -> Vec<(dahlia_core::storage::NewFace, Option<Vec<f3
                 .unwrap_or([0.0; 4]);
             let confidence = f.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
             let embedding = f.get("embedding").and_then(|v| v.as_array()).map(|a| {
-                a.iter().filter_map(|x| x.as_f64().map(|y| y as f32)).collect::<Vec<f32>>()
+                a.iter()
+                    .filter_map(|x| x.as_f64().map(|y| y as f32))
+                    .collect::<Vec<f32>>()
             });
             out.push((
                 dahlia_core::storage::NewFace { bbox, confidence },
@@ -66,23 +72,38 @@ fn faces_from(resp: &Value) -> Vec<(dahlia_core::storage::NewFace, Option<Vec<f3
     out
 }
 
-fn save_crop(asset_path: &str, bbox: [f32; 4], dest: &Path) {
+fn save_crop(asset_path: &str, bbox: [f32; 4], dest: &Path) -> Result<(), String> {
     // BBoxes come from the workers, which see the EXIF-corrected
     // image; the crop must be cut from the same corrected pixels.
-    let Ok(img) = crate::open_oriented_image(Path::new(asset_path)) else { return };
+    // Failures are returned, not swallowed (W99): the caller records
+    // them so "no crop" never appears out of nowhere downstream.
+    let img = crate::open_oriented_image(Path::new(asset_path))?;
     let (iw, ih) = (img.width() as f32, img.height() as f32);
     let x = bbox[0].clamp(0.0, iw - 1.0) as u32;
     let y = bbox[1].clamp(0.0, ih - 1.0) as u32;
     let w = bbox[2].clamp(1.0, iw - x as f32) as u32;
     let h = bbox[3].clamp(1.0, ih - y as f32) as u32;
     if w == 0 || h == 0 {
-        return;
+        return Err("顔の切り抜き範囲を計算できませんでした".into());
     }
     let crop = img.crop_imm(x, y, w, h);
     if let Some(parent) = dest.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let _ = crop.save_with_format(dest, image::ImageFormat::Jpeg);
+    crop.save_with_format(dest, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())
+}
+
+/// Record a per-asset failure (best effort: recording must not mask
+/// the original outcome) with a user-facing message (W11).
+fn record(db: &Db, project_id: i64, asset_id: i64, stage: &str, target: &str, raw: &str) {
+    let _ = db.record_failure(
+        project_id,
+        Some(asset_id),
+        stage,
+        target,
+        &crate::errors::friendly(raw),
+    );
 }
 
 pub fn detect_faces(
@@ -91,10 +112,35 @@ pub fn detect_faces(
     crops_dir: &Path,
     project_id: i64,
 ) -> Result<DetectReport, String> {
+    detect_impl(db, cfg, crops_dir, project_id, false)
+}
+
+/// Detection that deliberately redoes every photo, including the
+/// ones already processed (the normal run skips those).
+pub fn redetect_faces(
+    db: &Db,
+    cfg: &WorkerConfig,
+    crops_dir: &Path,
+    project_id: i64,
+) -> Result<DetectReport, String> {
+    detect_impl(db, cfg, crops_dir, project_id, true)
+}
+
+fn detect_impl(
+    db: &Db,
+    cfg: &WorkerConfig,
+    crops_dir: &Path,
+    project_id: i64,
+    force: bool,
+) -> Result<DetectReport, String> {
     let assets = db.list_assets(project_id).map_err(|e| e.to_string())?;
     let mut session = WorkerSession::start(cfg, "face").map_err(|e| e.to_string())?;
-    let (mut processed, mut found, mut failed) = (0usize, 0usize, 0usize);
+    let (mut processed, mut found, mut failed, mut skipped) = (0usize, 0usize, 0usize, 0usize);
     for asset in &assets {
+        if asset.detected && !force {
+            skipped += 1;
+            continue;
+        }
         match session.call(json!({ "image": asset.path })) {
             Ok(resp) => {
                 let detected = faces_from(&resp);
@@ -103,17 +149,58 @@ pub fn detect_faces(
                     Ok(saved) => {
                         processed += 1;
                         found += saved.len();
+                        let _ = db.clear_failure_for(asset.id, "detect");
+                        let mut crop_error: Option<String> = None;
                         for face in &saved {
-                            save_crop(&asset.path, face.bbox, &crops_dir.join(format!("{}.jpg", face.id)));
+                            if let Err(e) = save_crop(
+                                &asset.path,
+                                face.bbox,
+                                &crops_dir.join(format!("{}.jpg", face.id)),
+                            ) {
+                                if crop_error.is_none() {
+                                    crop_error = Some(e);
+                                }
+                            }
+                        }
+                        match crop_error {
+                            Some(e) => record(db, project_id, asset.id, "crop", &asset.path, &e),
+                            None => {
+                                let _ = db.clear_failure_for(asset.id, "crop");
+                            }
                         }
                     }
-                    Err(_) => failed += 1,
+                    Err(e) => {
+                        failed += 1;
+                        record(
+                            db,
+                            project_id,
+                            asset.id,
+                            "detect",
+                            &asset.path,
+                            &e.to_string(),
+                        );
+                    }
                 }
             }
-            Err(_) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                record(
+                    db,
+                    project_id,
+                    asset.id,
+                    "detect",
+                    &asset.path,
+                    &e.to_string(),
+                );
+            }
         }
     }
-    Ok(DetectReport { images_processed: processed, faces_found: found, failed })
+    Ok(DetectReport {
+        images_processed: processed,
+        faces_found: found,
+        failed,
+        skipped,
+    })
 }
 
 pub fn generate_embeddings(
@@ -123,14 +210,27 @@ pub fn generate_embeddings(
 ) -> Result<EmbedReport, String> {
     let assets = db.list_assets(project_id).map_err(|e| e.to_string())?;
     let mut session = WorkerSession::start(cfg, "embedding").map_err(|e| e.to_string())?;
-    let (mut embedded, mut failed) = (0usize, 0usize);
+    let (mut embedded, mut failed, mut skipped) = (0usize, 0usize, 0usize);
     for asset in &assets {
         let stored = db.list_faces(asset.id).map_err(|e| e.to_string())?;
         if stored.is_empty() {
             continue;
         }
+        // Skip faces that already have an embedding for this model
+        // (W20): only assets with missing embeddings reach the worker.
+        let done: std::collections::HashSet<i64> = db
+            .embedded_face_ids(asset.id, EMBED_MODEL)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .collect();
+        skipped += done.len();
+        if stored.iter().all(|f| done.contains(&f.id)) {
+            let _ = db.clear_failure_for(asset.id, "embed");
+            continue;
+        }
         match session.call(json!({ "image": asset.path })) {
             Ok(resp) => {
+                let _ = db.clear_failure_for(asset.id, "embed");
                 for (detected, embedding) in faces_from(&resp) {
                     let Some(vector) = embedding else { continue };
                     // Match to the stored face with the nearest bbox center.
@@ -146,17 +246,44 @@ pub fn generate_embeddings(
                         da.partial_cmp(&db_).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     if let Some(face) = nearest {
+                        if done.contains(&face.id) {
+                            continue;
+                        }
                         match db.save_embedding(face.id, EMBED_MODEL, &vector) {
                             Ok(()) => embedded += 1,
-                            Err(_) => failed += 1,
+                            Err(e) => {
+                                failed += 1;
+                                record(
+                                    db,
+                                    project_id,
+                                    asset.id,
+                                    "embed",
+                                    &asset.path,
+                                    &e.to_string(),
+                                );
+                            }
                         }
                     }
                 }
             }
-            Err(_) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                record(
+                    db,
+                    project_id,
+                    asset.id,
+                    "embed",
+                    &asset.path,
+                    &e.to_string(),
+                );
+            }
         }
     }
-    Ok(EmbedReport { embedded, failed })
+    Ok(EmbedReport {
+        embedded,
+        failed,
+        skipped,
+    })
 }
 
 fn mean_cosine_to_centroid(vectors: &[&Vec<f32>]) -> f32 {
@@ -192,12 +319,10 @@ pub fn cluster_identities(
         // Guard (W7): with no embeddings there is nothing to cluster,
         // and an empty result must never wipe the identities the user
         // already has. Refuse with guidance instead of replacing.
-        return Err(
-            "特徴量がまだ取得されていないため、人物を分類できません。\
+        return Err("特徴量がまだ取得されていないため、人物を分類できません。\
              先に「特徴量を取得する」を実行してください\
              （登録済みの人物データはそのまま保持されています）"
-                .into(),
-        );
+            .into());
     }
     let by_id: std::collections::HashMap<i64, &dahlia_core::storage::FaceEmbedding> =
         items.iter().map(|f| (f.face_id, f)).collect();
@@ -289,6 +414,12 @@ pub fn cluster_identities(
     }
 
     let total = reconciled.len();
-    db.reconcile_identities(project_id, &reconciled).map_err(|e| e.to_string())?;
-    Ok(ClusterReport { identities: total, clustered_faces, single_faces, names_carried_over })
+    db.reconcile_identities(project_id, &reconciled)
+        .map_err(|e| e.to_string())?;
+    Ok(ClusterReport {
+        identities: total,
+        clustered_faces,
+        single_faces,
+        names_carried_over,
+    })
 }

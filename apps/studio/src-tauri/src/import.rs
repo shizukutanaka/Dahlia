@@ -17,7 +17,9 @@ pub struct ImportReport {
 }
 
 fn collect_images(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -41,7 +43,12 @@ fn make_thumbnail(src: &Path, dest: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-pub fn import_folder(db: &Db, thumbs_dir: &Path, project_id: i64, folder: &Path) -> Result<ImportReport, String> {
+pub fn import_folder(
+    db: &Db,
+    thumbs_dir: &Path,
+    project_id: i64,
+    folder: &Path,
+) -> Result<ImportReport, String> {
     let mut files = Vec::new();
     collect_images(folder, &mut files);
     files.sort();
@@ -55,8 +62,16 @@ pub fn import_folder(db: &Db, thumbs_dir: &Path, project_id: i64, folder: &Path)
         let is_new = !existing.contains(&path_str);
         let asset = match db.add_asset(project_id, &path_str, None) {
             Ok(a) => a,
-            Err(_) => {
+            Err(e) => {
                 failed += 1;
+                // Keep the failure visible (W11): which file, why.
+                let _ = db.record_failure(
+                    project_id,
+                    None,
+                    "import",
+                    &path_str,
+                    &crate::errors::friendly(&e.to_string()),
+                );
                 continue;
             }
         };
@@ -70,13 +85,26 @@ pub fn import_folder(db: &Db, thumbs_dir: &Path, project_id: i64, folder: &Path)
             match make_thumbnail(&file, &dest) {
                 Ok(()) => {
                     let _ = db.set_asset_thumbnail(asset.id, &dest.to_string_lossy());
+                    let _ = db.clear_failure_for(asset.id, "import");
                 }
-                Err(_) => {
+                Err(e) => {
                     failed += 1;
+                    let _ = db.record_failure(
+                        project_id,
+                        Some(asset.id),
+                        "import",
+                        &path_str,
+                        &crate::errors::friendly(&e),
+                    );
                 }
             }
         }
     }
     let assets = db.list_assets(project_id).map_err(|e| e.to_string())?;
-    Ok(ImportReport { added, already_present: present, failed, assets })
+    Ok(ImportReport {
+        added,
+        already_present: present,
+        failed,
+        assets,
+    })
 }

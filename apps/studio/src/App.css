@@ -176,3 +176,45 @@ button.link {
   margin: 10px 0;
   font-size: 13px;
 }
+
+.card-wrap {
+  position: relative;
+  display: flex;
+}
+
+.card-del {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.mini {
+  font-size: 11px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.fail-list {
+  margin: 8px 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.fail-list li {
+  margin: 4px 0;
+  word-break: break-all;
+}
+
+.face-move {
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px 8px;
+}
+
+.face-move select {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+}

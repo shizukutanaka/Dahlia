@@ -7,8 +7,16 @@ import {
   type Asset,
   type Identity,
   type IdentityDetail,
+  type ProcessingFailure,
   type Project,
 } from "./api";
+
+const STAGE_LABEL: Record<ProcessingFailure["stage"], string> = {
+  import: "写真の読み込み",
+  detect: "顔の検出",
+  embed: "特徴量の取得",
+  crop: "顔の切り抜き",
+};
 const Space3D = lazy(() => import("./Space3D"));
 const FaceMesh3D = lazy(() => import("./FaceMesh3D"));
 import "./App.css";
@@ -22,6 +30,8 @@ type View =
 function App() {
   const [view, setView] = useState<View>({ kind: "projects" });
   const [dbPath, setDbPath] = useState<string>("");
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [logPath, setLogPath] = useState<string | null>(null);
   const [error, setError] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
 
@@ -30,6 +40,8 @@ function App() {
       .dbStatus()
       .then((s) => {
         setDbPath(s.db_path);
+        setAppVersion(s.app_version);
+        setLogPath(s.log_path);
         if (s.notice) setNotice(s.notice);
       })
       .catch((e) => setError(`データベースに接続できません: ${e}`));
@@ -67,10 +79,14 @@ function App() {
       {view.kind === "identity" && (
         <IdentityView
           identityId={view.identityId}
+          projectId={view.project.id}
           onBack={() => setView({ kind: "project", project: view.project })}
         />
       )}
-      <footer>データの保存先: {dbPath}</footer>
+      <footer>
+        Dahlia v{appVersion} ／ データの保存先: {dbPath}
+        {logPath && <> ／ ログ: {logPath}</>}
+      </footer>
     </div>
   );
 }
@@ -90,6 +106,19 @@ function ProjectList({ onOpen }: { onOpen: (p: Project) => void }) {
     try {
       await api.createProject(name.trim());
       setName("");
+      load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function remove(p: Project) {
+    const ok = window.confirm(
+      `プロジェクト「${p.name}」を削除しますか？\n登録した写真・顔・人物のデータがすべて消えます。\n（元の写真ファイルは消えません）`,
+    );
+    if (!ok) return;
+    try {
+      await api.deleteProject(p.id);
       load();
     } catch (e) {
       setError(String(e));
@@ -118,10 +147,19 @@ function ProjectList({ onOpen }: { onOpen: (p: Project) => void }) {
       )}
       <div className="cards">
         {projects.map((p) => (
-          <button key={p.id} className="card" onClick={() => onOpen(p)}>
-            <strong>{p.name}</strong>
-            <span className="hint">{p.created_at}</span>
-          </button>
+          <div key={p.id} className="card-wrap">
+            <button className="card" onClick={() => onOpen(p)}>
+              <strong>{p.name}</strong>
+              <span className="hint">{p.created_at}</span>
+            </button>
+            <button
+              className="card-del"
+              title="このプロジェクトを削除"
+              onClick={() => remove(p)}
+            >
+              削除
+            </button>
+          </div>
         ))}
       </div>
     </main>
@@ -142,6 +180,7 @@ function ProjectView({
   const [assets, setAssets] = useState<Asset[]>([]);
   const [identities, setIdentities] = useState<Identity[]>([]);
   const [faceCounts, setFaceCounts] = useState<Record<number, number>>({});
+  const [failures, setFailures] = useState<ProcessingFailure[]>([]);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -163,10 +202,15 @@ function ProjectView({
     api.listIdentities(project.id).then(setIdentities).catch(() => {});
   }, [project.id]);
 
+  const loadFailures = useCallback(() => {
+    api.listFailures(project.id).then(setFailures).catch(() => {});
+  }, [project.id]);
+
   useEffect(() => {
     loadAssets().catch((e) => setError(String(e)));
     loadIdentities();
-  }, [loadAssets, loadIdentities]);
+    loadFailures();
+  }, [loadAssets, loadIdentities, loadFailures]);
 
   async function run<T>(label: string, job: () => Promise<T>, done: (r: T) => string) {
     setBusy(label);
@@ -179,6 +223,47 @@ function ProjectView({
       setError(`${label}に失敗しました: ${e}`);
     } finally {
       setBusy("");
+      loadFailures();
+    }
+  }
+
+  async function removeAsset(a: Asset) {
+    const ok = window.confirm(
+      `「${baseName(a.path)}」の登録を解除しますか？\n検出した顔や特徴量も消えます。\n（元の写真ファイルは消えません）`,
+    );
+    if (!ok) return;
+    try {
+      await api.removeAsset(a.id);
+      loadAssets();
+      loadIdentities();
+      loadFailures();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function retryStage(stage: ProcessingFailure["stage"]) {
+    if (stage === "detect") {
+      run("顔の検出", () => api.detectFaces(project.id), (r) => {
+        loadAssets();
+        return `検出完了: ${r.images_processed} 枚から顔が ${r.faces_found} 個見つかりました（失敗 ${r.failed} 枚）`;
+      });
+    } else if (stage === "crop") {
+      // Crops are only regenerated together with detection, and the
+      // normal run skips processed photos — so retrying a crop means
+      // re-detecting that photo (the full re-detect covers it).
+      run("顔の検出（全件）", () => api.redetectFaces(project.id), (r) => {
+        loadAssets();
+        return `再検出完了: ${r.images_processed} 枚から顔が ${r.faces_found} 個見つかりました（失敗 ${r.failed} 枚）`;
+      });
+    } else if (stage === "embed") {
+      run(
+        "特徴量の取得",
+        () => api.generateEmbeddings(project.id),
+        (r) => `特徴量を取得しました: ${r.embedded} 件（失敗 ${r.failed} 件）`,
+      );
+    } else {
+      importFolder();
     }
   }
 
@@ -210,7 +295,9 @@ function ProjectView({
             onClick={() =>
               run("顔の検出", () => api.detectFaces(project.id), (r) => {
                 loadAssets();
-                return `検出完了: ${r.images_processed} 枚から顔が ${r.faces_found} 個見つかりました（失敗 ${r.failed} 枚）`;
+                const skipped =
+                  r.skipped > 0 ? `（処理済みの ${r.skipped} 枚はスキップしました）` : "";
+                return `検出完了: ${r.images_processed} 枚から顔が ${r.faces_found} 個見つかりました（失敗 ${r.failed} 枚）${skipped}`;
               })
             }
             disabled={!!busy || assets.length === 0}
@@ -218,10 +305,27 @@ function ProjectView({
             🔍 顔を検出する
           </button>
           <button
+            onClick={() => {
+              const ok = window.confirm(
+                "すべての写真を検出し直しますか？\n顔を作り直すため、取得済みの特徴量は消えます（続けて「特徴量を取得する」「人物を分類する」が必要になります）。",
+              );
+              if (!ok) return;
+              run("顔の検出（全件）", () => api.redetectFaces(project.id), (r) => {
+                loadAssets();
+                return `再検出完了: ${r.images_processed} 枚から顔が ${r.faces_found} 個見つかりました（失敗 ${r.failed} 枚）`;
+              });
+            }}
+            disabled={!!busy || assets.length === 0}
+          >
+            全件を再検出
+          </button>
+          <button
             onClick={() =>
-              run("特徴量の取得", () => api.generateEmbeddings(project.id), (r) =>
-                `特徴量を取得しました: ${r.embedded} 件（失敗 ${r.failed} 件）`,
-              )
+              run("特徴量の取得", () => api.generateEmbeddings(project.id), (r) => {
+                const skipped =
+                  r.skipped > 0 ? `（取得済みの ${r.skipped} 件はスキップしました）` : "";
+                return `特徴量を取得しました: ${r.embedded} 件（失敗 ${r.failed} 件）${skipped}`;
+              })
             }
             disabled={!!busy || assets.length === 0}
           >
@@ -254,12 +358,52 @@ function ProjectView({
                 <figcaption>
                   {baseName(a.path)}
                   {faceCounts[a.id] ? <span className="badge">顔 {faceCounts[a.id]}</span> : null}
+                  <button
+                    className="mini"
+                    title="この写真の登録を解除"
+                    onClick={() => removeAsset(a)}
+                  >
+                    登録解除
+                  </button>
                 </figcaption>
               </figure>
             ))}
           </div>
         )}
       </section>
+
+      {failures.length > 0 && (
+        <section>
+          <h3>処理に失敗した写真（{failures.length}件）</h3>
+          <p className="hint">
+            失敗した写真は処理から静かに消えず、ここに理由とともに残ります。原因を取り除いてから再試行してください。
+          </p>
+          <ul className="fail-list">
+            {failures.map((f) => (
+              <li key={f.id}>
+                <span className="badge">{STAGE_LABEL[f.stage]}</span> {baseName(f.target)}
+                <span className="hint"> — {f.message}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="row">
+            {[...new Set(failures.map((f) => f.stage))].map((stage) => (
+              <button key={stage} onClick={() => retryStage(stage)} disabled={!!busy}>
+                {STAGE_LABEL[stage]}を再試行
+              </button>
+            ))}
+            <button
+              onClick={async () => {
+                await api.clearFailures(project.id);
+                loadFailures();
+              }}
+              disabled={!!busy}
+            >
+              記録を消す
+            </button>
+          </div>
+        </section>
+      )}
 
       <section>
         <h3>
@@ -291,11 +435,22 @@ function ProjectView({
   );
 }
 
-function IdentityView({ identityId, onBack }: { identityId: number; onBack: () => void }) {
+function IdentityView({
+  identityId,
+  projectId,
+  onBack,
+}: {
+  identityId: number;
+  projectId: number;
+  onBack: () => void;
+}) {
   const [detail, setDetail] = useState<IdentityDetail | null>(null);
   const [showMesh, setShowMesh] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
+  const [others, setOthers] = useState<Identity[]>([]);
+  const [mergeTarget, setMergeTarget] = useState("");
+  const [moveTargets, setMoveTargets] = useState<Record<number, string>>({});
 
   const load = useCallback(() => {
     api
@@ -305,13 +460,43 @@ function IdentityView({ identityId, onBack }: { identityId: number; onBack: () =
         setName(d.identity.name);
       })
       .catch((e) => setError(String(e)));
-  }, [identityId]);
+    api
+      .listIdentities(projectId)
+      .then((list) => setOthers(list.filter((i) => i.id !== identityId)))
+      .catch(() => {});
+  }, [identityId, projectId]);
   useEffect(load, [load]);
 
   async function rename() {
     if (!name.trim()) return;
     try {
       await api.renameIdentity(identityId, name.trim());
+      load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function merge() {
+    if (!mergeTarget || !detail) return;
+    const target = others.find((i) => i.id === Number(mergeTarget));
+    const ok = window.confirm(
+      `「${detail.identity.name}」を「${target?.name ?? ""}」に統合しますか？\nこの人物の顔はすべて統合先に移り、この人物は一覧から消えます。`,
+    );
+    if (!ok) return;
+    try {
+      await api.mergeIdentities(Number(mergeTarget), identityId);
+      onBack();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function moveFace(faceId: number) {
+    const target = moveTargets[faceId];
+    if (!target) return;
+    try {
+      await api.moveFaceToIdentity(faceId, Number(target));
       load();
     } catch (e) {
       setError(String(e));
@@ -335,6 +520,28 @@ function IdentityView({ identityId, onBack }: { identityId: number; onBack: () =
           顔 {detail.identity.face_count} 件 / 品質スコア {detail.identity.quality_score.toFixed(2)}
         </span>
       </div>
+      {others.length > 0 && (
+        <section>
+          <h3>人物の整理（分類の間違いを直す）</h3>
+          <div className="row">
+            <span className="hint">同じ人物が分かれてしまったときは統合できます:</span>
+            <select value={mergeTarget} onChange={(e) => setMergeTarget(e.target.value)}>
+              <option value="">統合先の人物を選ぶ</option>
+              {others.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name}（顔 {o.face_count} 件）
+                </option>
+              ))}
+            </select>
+            <button onClick={merge} disabled={!mergeTarget}>
+              この人物を統合する
+            </button>
+          </div>
+          <p className="hint">
+            1件だけ人物が違う顔は、下の一覧で顔ごとに別の人物へ移動できます。
+          </p>
+        </section>
+      )}
       <section>
         <h3>
           3D顔プレビュー
@@ -353,6 +560,30 @@ function IdentityView({ identityId, onBack }: { identityId: number; onBack: () =
           <figure key={face.id} className="thumb">
             <img src={fileUrl(crop_path)} alt={baseName(asset_path)} loading="lazy" />
             <figcaption>{baseName(asset_path)}</figcaption>
+            {others.length > 0 && (
+              <div className="face-move">
+                <select
+                  value={moveTargets[face.id] ?? ""}
+                  onChange={(e) =>
+                    setMoveTargets((m) => ({ ...m, [face.id]: e.target.value }))
+                  }
+                >
+                  <option value="">移動先…</option>
+                  {others.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="mini"
+                  onClick={() => moveFace(face.id)}
+                  disabled={!moveTargets[face.id]}
+                >
+                  移動
+                </button>
+              </div>
+            )}
           </figure>
         ))}
       </div>
