@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import run_loop  # noqa: E402
+from common import load_image_rgb, run_loop  # noqa: E402
 
 SCALE = 4.2
 UMAP_MIN_POINTS = 20
@@ -108,7 +108,7 @@ def make_depth(image_path: str, out_path: str) -> dict:
 
     if _session is None:
         _session = ort.InferenceSession(model, providers=["CPUExecutionProvider"])
-    img = Image.open(image_path).convert("RGB").resize((518, 518))
+    img = load_image_rgb(image_path).resize((518, 518))
     arr = np.asarray(img).astype(np.float32) / 255.0
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     std = np.array([0.229, 0.224, 0.225], dtype=np.float32)

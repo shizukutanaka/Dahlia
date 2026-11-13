@@ -67,7 +67,9 @@ fn faces_from(resp: &Value) -> Vec<(dahlia_core::storage::NewFace, Option<Vec<f3
 }
 
 fn save_crop(asset_path: &str, bbox: [f32; 4], dest: &Path) {
-    let Ok(img) = image::open(asset_path) else { return };
+    // BBoxes come from the workers, which see the EXIF-corrected
+    // image; the crop must be cut from the same corrected pixels.
+    let Ok(img) = crate::open_oriented_image(Path::new(asset_path)) else { return };
     let (iw, ih) = (img.width() as f32, img.height() as f32);
     let x = bbox[0].clamp(0.0, iw - 1.0) as u32;
     let y = bbox[1].clamp(0.0, ih - 1.0) as u32;

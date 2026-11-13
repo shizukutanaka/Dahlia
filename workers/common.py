@@ -8,6 +8,21 @@ import sys
 import traceback
 
 
+def load_image_rgb(path):
+    """Open an image as RGB with its EXIF orientation applied.
+
+    Phone photos are usually stored rotated with the intended viewing
+    orientation kept only in the EXIF tag; without applying it, faces
+    lie sideways and detection misses them (W86). Every worker must
+    load source photos through this helper so that pixel coordinates
+    (bounding boxes, landmarks) agree across detection, embedding and
+    preview generation.
+    """
+    from PIL import Image, ImageOps
+
+    return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+
+
 def run_loop(handle):
     out = sys.stdout
     for line in sys.stdin:

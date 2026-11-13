@@ -23,7 +23,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "face"))
-from common import run_loop  # noqa: E402
+from common import load_image_rgb, run_loop  # noqa: E402
 import worker as face_worker  # workers/face/worker.py  # noqa: E402
 
 MODEL_NAME = "arcface-mbf"
@@ -85,7 +85,7 @@ def _warp_affine(img: Image.Image, m_src_to_dst: np.ndarray) -> Image.Image:
 
 
 def embed(image_path: str) -> list[dict]:
-    img = Image.open(image_path).convert("RGB")
+    img = load_image_rgb(image_path)
     faces = face_worker.detect(image_path)
     sess = session()
     input_name = sess.get_inputs()[0].name

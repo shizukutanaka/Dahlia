@@ -30,6 +30,50 @@ def _load(name: str, path: Path):
 
 clustering_worker = _load("clustering_worker", ROOT / "workers" / "clustering" / "worker.py")
 
+sys.path.insert(0, str(ROOT / "workers"))
+import common as workers_common  # noqa: E402
+
+
+class ExifOrientationTest(unittest.TestCase):
+    """W86: workers must see phone photos upright (EXIF applied)."""
+
+    def test_orientation_6_rotates_image_upright(self):
+        import tempfile
+
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sideways.jpg"
+            # Stored pixels are 4x2 with the whole top row red; EXIF
+            # orientation 6 says "rotate 90 deg CW".
+            img = Image.new("RGB", (4, 2), (0, 0, 0))
+            for x in range(4):
+                img.putpixel((x, 0), (255, 0, 0))
+            exif = Image.Exif()
+            exif[274] = 6  # Orientation
+            img.save(path, exif=exif, quality=95, subsampling=0)
+
+            loaded = workers_common.load_image_rgb(str(path))
+            self.assertEqual(loaded.size, (2, 4))
+            # After a 90 deg CW rotation the stored top row becomes
+            # the right-hand column of the corrected image.
+            r, g, b = loaded.getpixel((1, 2))
+            self.assertTrue(r > 150 and r > g + 80, f"expected red, got {(r, g, b)}")
+            r2, g2, b2 = loaded.getpixel((0, 2))
+            self.assertTrue(r2 < 80, f"expected black, got {(r2, g2, b2)}")
+
+    def test_no_exif_loads_unchanged(self):
+        import tempfile
+
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plain.jpg"
+            Image.new("RGB", (4, 2), (10, 20, 30)).save(path)
+            loaded = workers_common.load_image_rgb(str(path))
+            self.assertEqual(loaded.size, (4, 2))
+            self.assertEqual(loaded.getpixel((0, 0)), (10, 20, 30))
+
 
 def unit(v):
     v = np.array(v, dtype=float)

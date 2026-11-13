@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import run_loop  # noqa: E402
+from common import load_image_rgb, run_loop  # noqa: E402
 
 MODEL_NAME = "scrfd-500m"
 INPUT_SIZE = 640
@@ -69,7 +69,7 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, thresh: float) -> list[int]:
 
 
 def detect(image_path: str) -> list[dict]:
-    img = Image.open(image_path).convert("RGB")
+    img = load_image_rgb(image_path)
     orig_w, orig_h = img.size
     r = min(INPUT_SIZE / orig_w, INPUT_SIZE / orig_h)
     new_w, new_h = int(round(orig_w * r)), int(round(orig_h * r))

@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import run_loop  # noqa: E402
+from common import load_image_rgb, run_loop  # noqa: E402
 
 _landmarker = None
 
@@ -161,10 +161,10 @@ def handle(req: dict) -> dict:
     # Load via PIL and force RGB: grayscale JPEGs (e.g. historical
     # B/W portraits, and Dahlia's own crops of them) would otherwise
     # reach the detector as 1-channel tensors and fail inference.
-    from PIL import Image as PILImage
-
+    # EXIF orientation is applied so the preview matches what the
+    # other workers saw.
     arr = np.ascontiguousarray(
-        np.asarray(PILImage.open(image_path).convert("RGB"), dtype=np.uint8)
+        np.asarray(load_image_rgb(image_path), dtype=np.uint8)
     )
     image = mp.Image(image_format=mp.ImageFormat.SRGB, data=arr)
     result = landmarker.detect(image)

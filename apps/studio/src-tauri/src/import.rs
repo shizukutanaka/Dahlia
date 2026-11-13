@@ -31,7 +31,7 @@ fn collect_images(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn make_thumbnail(src: &Path, dest: &Path) -> Result<(), String> {
-    let img = image::open(src).map_err(|e| e.to_string())?;
+    let img = crate::open_oriented_image(src)?;
     let thumb = img.thumbnail(320, 320);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;

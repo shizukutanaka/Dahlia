@@ -5,6 +5,7 @@
 
 pub mod facemesh;
 pub mod import;
+pub mod orient;
 pub mod pipeline;
 pub mod space;
 
@@ -33,6 +34,34 @@ impl AppState {
 
 fn to_err<T>(r: dahlia_core::Result<T>) -> Result<T, String> {
     r.map_err(|e| e.to_string())
+}
+
+/// Open an image with its EXIF orientation applied (W86), so Rust-side
+/// pixels agree with what the Python workers see (they apply the same
+/// correction through PIL). Used for thumbnails and face crops.
+pub(crate) fn open_oriented_image(
+    path: &std::path::Path,
+) -> Result<image::DynamicImage, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+    Ok(apply_orientation(img, orient::transform_for_jpeg(&bytes)))
+}
+
+fn apply_orientation(
+    img: image::DynamicImage,
+    transform: orient::Transform,
+) -> image::DynamicImage {
+    use orient::Transform;
+    match transform {
+        Transform::None => img,
+        Transform::FlipHorizontal => img.fliph(),
+        Transform::Rotate180 => img.rotate180(),
+        Transform::FlipVertical => img.flipv(),
+        Transform::Transpose => img.rotate90().fliph(),
+        Transform::Rotate90Cw => img.rotate90(),
+        Transform::Transverse => img.rotate90().flipv(),
+        Transform::Rotate270Cw => img.rotate270(),
+    }
 }
 
 #[derive(Serialize)]
