@@ -7,6 +7,7 @@ Covers the clustering algorithm and the face worker over the sample
 photos (tests/samples). Model files are required for the face tests;
 they are skipped when absent.
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -97,6 +98,183 @@ class ClusteringTest(unittest.TestCase):
     def test_empty(self):
         r = clustering_worker.handle({"items": []})
         self.assertEqual(r, {"clusters": [], "noise": []})
+
+
+def _reference_cluster(items, eps, min_samples):
+    """The pre-W21 implementation (dense n x n distance matrix),
+    kept here as the ground truth the blocked version must match."""
+    if not items:
+        return {"clusters": [], "noise": []}
+    vectors = np.array([it["vector"] for it in items], dtype=np.float64)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
+    unit = vectors / norms
+    dist = 1.0 - unit @ unit.T
+    np.fill_diagonal(dist, 0.0)
+    n = dist.shape[0]
+    UNVISITED, NOISE = -2, -1
+    labels = np.full(n, UNVISITED, dtype=int)
+    neighbors = [np.where(dist[i] <= eps)[0] for i in range(n)]
+    cluster = 0
+    for i in range(n):
+        if labels[i] != UNVISITED:
+            continue
+        if len(neighbors[i]) < min_samples:
+            labels[i] = NOISE
+            continue
+        labels[i] = cluster
+        queue = list(neighbors[i])
+        head = 0
+        while head < len(queue):
+            j = queue[head]
+            head += 1
+            if labels[j] == NOISE:
+                labels[j] = cluster
+            if labels[j] != UNVISITED:
+                continue
+            labels[j] = cluster
+            if len(neighbors[j]) >= min_samples:
+                queue.extend(neighbors[j])
+        cluster += 1
+    clusters, noise = {}, []
+    for item, lab in zip(items, labels):
+        if lab == NOISE:
+            noise.append(item["face_id"])
+        else:
+            clusters.setdefault(int(lab), []).append(item["face_id"])
+    return {"clusters": [clusters[k] for k in sorted(clusters)], "noise": noise}
+
+
+def _grouped_items(rng, people, per_person, dim, noise_n=0, fid0=1):
+    """Synthetic faces: tight groups (distance ~0.44 within a
+    person, ~1.0 across) so eps=0.68 decisions have wide margins."""
+    items, fid = [], fid0
+    # Per-component noise sigma chosen so sigma^2 * dim = 0.78 at
+    # any dim, giving within-person cosine distance ~0.44.
+    sigma = (0.78 / dim) ** 0.5
+    for _ in range(people):
+        base = rng.normal(size=dim)
+        base /= np.linalg.norm(base)
+        for _ in range(per_person):
+            v = base + sigma * rng.normal(size=dim)
+            v /= np.linalg.norm(v)
+            items.append({"face_id": fid, "vector": v.tolist()})
+            fid += 1
+    for _ in range(noise_n):
+        v = rng.normal(size=dim)
+        v /= np.linalg.norm(v)
+        items.append({"face_id": fid, "vector": v.tolist()})
+        fid += 1
+    return items
+
+
+def _as_sets(result):
+    return (
+        sorted(tuple(sorted(c)) for c in result["clusters"]),
+        tuple(result["noise"]),
+    )
+
+
+class ClusteringEquivalenceTest(unittest.TestCase):
+    """W21: the blocked neighbor search must produce exactly the
+    labels the dense implementation produced."""
+
+    def check(self, items, eps, min_samples):
+        got = clustering_worker.handle(
+            {"items": items, "eps": eps, "min_samples": min_samples}
+        )
+        want = _reference_cluster(items, eps, min_samples)
+        self.assertEqual(_as_sets(got), _as_sets(want))
+
+    def test_small_dims_random_groups(self):
+        rng = np.random.default_rng(7)
+        for dim in (8, 33):
+            items = _grouped_items(rng, people=6, per_person=4, dim=dim, noise_n=5)
+            self.check(items, eps=0.68, min_samples=2)
+            self.check(items, eps=0.68, min_samples=3)
+
+    def test_full_dim_and_chained_groups(self):
+        rng = np.random.default_rng(11)
+        items = _grouped_items(rng, people=5, per_person=6, dim=512, noise_n=7)
+        self.check(items, eps=0.68, min_samples=2)
+        # An exact duplicate pair (distance exactly ~0) must cluster
+        # together even at a tiny eps, as it did before.
+        dup = dict(items[0])
+        dup["face_id"] = 9999
+        self.check(items + [dup], eps=0.01, min_samples=2)
+
+    def test_min_samples_one_and_singletons(self):
+        rng = np.random.default_rng(3)
+        items = _grouped_items(rng, people=3, per_person=1, dim=16, noise_n=2)
+        self.check(items, eps=0.68, min_samples=1)
+
+
+class ClusteringChunkedTest(unittest.TestCase):
+    """W22: items can be streamed in with add_items and clustered
+    by a separate request, with the one-shot result."""
+
+    def setUp(self):
+        clustering_worker.handle({"op": "clear"})
+
+    def tearDown(self):
+        clustering_worker.handle({"op": "clear"})
+
+    def test_chunked_matches_one_shot(self):
+        rng = np.random.default_rng(5)
+        items = _grouped_items(rng, people=4, per_person=5, dim=64, noise_n=3)
+        for chunk in (items[:7], items[7:15], items[15:]):
+            r = clustering_worker.handle({"op": "add_items", "items": chunk})
+        self.assertEqual(r["total"], len(items))
+        got = clustering_worker.handle({"op": "cluster", "eps": 0.68, "min_samples": 2})
+        want = clustering_worker.handle({"items": items, "eps": 0.68, "min_samples": 2})
+        self.assertEqual(_as_sets(got), _as_sets(want))
+        # The buffer was consumed: a second cluster sees nothing.
+        again = clustering_worker.handle({"op": "cluster", "eps": 0.68, "min_samples": 2})
+        self.assertEqual(again, {"clusters": [], "noise": []})
+
+    def test_cluster_with_empty_buffer(self):
+        r = clustering_worker.handle({"op": "cluster", "eps": 0.68, "min_samples": 2})
+        self.assertEqual(r, {"clusters": [], "noise": []})
+
+
+class ClusteringScaleTest(unittest.TestCase):
+    """W21: thousands of faces cluster correctly with the peak
+    memory bounded by the block budget, not by n^2."""
+
+    def test_six_thousand_faces(self):
+        import subprocess
+
+        # Feed the items through the chunked protocol (the way the
+        # app does it) so the measurement reflects the real path.
+        script = (
+            "import importlib.util, json, resource, sys\n"
+            "import numpy as np\n"
+            f"spec = importlib.util.spec_from_file_location('w', {str(ROOT / 'workers' / 'clustering' / 'worker.py')!r})\n"
+            "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+            "rng = np.random.default_rng(21)\n"
+            "fid = 0\n"
+            "for _ in range(240):\n"
+            "    base = rng.normal(size=512); base /= np.linalg.norm(base)\n"
+            "    chunk = []\n"
+            "    for _ in range(25):\n"
+            "        v = base + 0.039 * rng.normal(size=512); v /= np.linalg.norm(v)\n"
+            "        fid += 1; chunk.append({'face_id': fid, 'vector': v.tolist()})\n"
+            "    w.handle({'op': 'add_items', 'items': chunk})\n"
+            "r = w.handle({'op': 'cluster', 'eps': 0.68, 'min_samples': 2})\n"
+            "print(json.dumps({'clusters': len(r['clusters']), 'noise': len(r['noise']),\n"
+            "                  'rss_mb': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}))\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=600
+        )
+        self.assertEqual(out.returncode, 0, out.stderr[-1000:])
+        stats = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["clusters"], 240)
+        self.assertEqual(stats["noise"], 0)
+        # The dense matrix alone would add 6000^2 * 8 = 288 MB on
+        # top of the interpreter + vectors; the blocked version
+        # must stay far below that.
+        self.assertLess(stats["rss_mb"], 300, stats)
+
 
 
 @unittest.skipUnless(
