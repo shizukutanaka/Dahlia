@@ -11,7 +11,7 @@
 - `workers/` - Python AIワーカー (face / embedding / clustering) - ONNX Runtime
 - `database/` - SQLite スキーマ
 - `tests/` - テストとサンプルデータ
-- `docs/` - 仕様と設計メモ（仕様の正本は `docs/SPEC.md`、構成は `docs/ARCHITECTURE.md`）
+- `docs/` - 仕様と設計メモ（仕様の正本は `docs/SPEC.md`、構成は `docs/ARCHITECTURE.md`、精度の実測と閾値判断は `docs/EVALUATION.md`）
 - `scripts/` - バージョン整合チェックとポータブル版ビルド手順
 - `packaging/` - Windows ポータブル版の同梱物（起動 bat・README・自己診断）
 
