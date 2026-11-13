@@ -11,9 +11,10 @@
 #                WebView2Loader.dll from the same build output is
 #                picked up automatically when it sits next to it.
 #   PYTHON_DIR   A Windows embeddable Python 3.12 with the worker
-#                dependencies installed (numpy, pillow, onnxruntime;
-#                mediapipe for the facemesh component). This is the
-#                `python/` folder of a previous portable package.
+#                dependencies installed (numpy, pillow, onnxruntime,
+#                pillow-heif for HEIC photos; mediapipe for the
+#                facemesh component). This is the `python/` folder
+#                of a previous portable package.
 #
 # Optional:
 #   DEPTH_MODEL  depth-anything-v2-small.onnx to bundle AI depth.
@@ -45,6 +46,7 @@ fi
 
 # Launcher, readme, self-check (templates live in packaging/).
 cp packaging/Dahlia.bat packaging/README.txt packaging/check_env.py "$PKG/"
+cp packaging/THIRD-PARTY-LICENSES.txt "$PKG/"
 
 # Workers: code, docs and the bundled ONNX models. __pycache__ and
 # the dev venv never ship.
@@ -63,7 +65,7 @@ for w in face embedding clustering space facemesh; do
         cp workers/$w/models/* "$PKG/workers/$w/models/"
     fi
 done
-cp workers/common.py workers/README.md "$PKG/workers/"
+cp workers/common.py workers/heif_convert.py workers/README.md "$PKG/workers/"
 
 # Python runtime (as supplied) and the models folder for the
 # optional depth model.
@@ -78,9 +80,11 @@ fi
 # and the app look for must be present.
 missing=0
 for f in studio.exe Dahlia.bat README.txt check_env.py \
+         THIRD-PARTY-LICENSES.txt \
          workers/face/worker.py workers/embedding/worker.py \
          workers/clustering/worker.py workers/space/worker.py \
          workers/facemesh/worker.py workers/common.py \
+         workers/heif_convert.py \
          workers/face/models/det_500m.onnx \
          workers/embedding/models/w600k_mbf.onnx \
          workers/facemesh/models/face_landmarker.task \
@@ -91,6 +95,19 @@ for f in studio.exe Dahlia.bat README.txt check_env.py \
         missing=1
     fi
 done
+# HEIC support (W87) lives in the supplied Python folder: the
+# pillow_heif package and the libheif library it wraps must both be
+# there, or every HEIC photo fails to import at runtime. The wheel
+# layout puts the package under Lib/site-packages and the native
+# libraries next to it (also under site-packages).
+if ! find "$PKG/python" -type d -name pillow_heif | grep -q .; then
+    echo "missing in package: pillow_heif package under python/ (pip install pillow-heif)" >&2
+    missing=1
+fi
+if ! find "$PKG/python" -name "libheif*.dll" | grep -q .; then
+    echo "missing in package: libheif DLL under python/ (part of the pillow-heif wheel)" >&2
+    missing=1
+fi
 [ "$missing" -eq 0 ] || exit 1
 
 ZIP="$OUT_DIR/Dahlia-V$VERSION-Windows.zip"

@@ -16,6 +16,12 @@ try:
     lines.append("facemesh component (mediapipe): OK")
 except Exception:
     lines.append("facemesh component (mediapipe): not installed (optional)")
+try:
+    import pillow_heif
+
+    lines.append(f"heic support (pillow-heif): OK {pillow_heif.__version__}")
+except Exception:
+    lines.append("heic support (pillow-heif): not installed (HEIC photos cannot be imported)")
 
 text = "\n".join(lines) + "\n"
 try:

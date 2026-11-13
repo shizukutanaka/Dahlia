@@ -4,6 +4,8 @@
 
 写真から顔を検出し、特徴量で同一人物を分類して、再利用可能な Person Identity として保存します。画像生成機能は持ちません。
 
+取り込み対応形式: JPEG / PNG / WebP / BMP / GIF / HEIC / HEIF（iPhone の標準形式。HEIC の読み込みには pillow-heif が必要で、無い環境では HEIC の写真だけが失敗として記録されます）
+
 ## 構成
 
 - `apps/studio/` - Tauri + React + TypeScript デスクトップアプリ
@@ -31,7 +33,7 @@ npm run tauri dev
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install onnxruntime pillow numpy
+.venv/bin/pip install onnxruntime pillow numpy pillow-heif
 # モデル配置: workers/face/models/det_500m.onnx (SCRFD)
 #             workers/embedding/models/w600k_mbf.onnx (ArcFace)
 # 出典: InsightFace buffalo_s パック

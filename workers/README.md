@@ -17,6 +17,15 @@ Rust 側の監督 (core/jobs): ワーカーが一定時間（既定300秒、
 終了させる。利用者が中断した場合はワーカーごと止める。中断・
 タイムアウト・切断のあと、そのセッションは再利用されない。
 
+- 共通        画像の読み込みは common.load_image_rgb に集約（EXIF 回転の
+              適用込み）。HEIC/HEIF (W87) は pillow-heif が必要:
+              pip install pillow-heif
+              無い環境では HEIC の写真だけが理由つきで失敗する。
+- heif_convert.py  HEIC → JPEG 変換の一回限りスクリプト。Rust 側は
+              HEIC を直接読めないため、取り込み時にアプリデータ内へ
+              作業コピー (プロキシ) を作り、サムネイルと顔の切り抜きを
+              そこから作る。Rust 側 (src-tauri の heif.rs) が
+              SRC/DST の組を引数に一括で呼ぶ。
 - face/       顔検出 (SCRFD, ONNX)
 - embedding/  顔特徴量 (ArcFace系, ONNX)
 - clustering/ DBSCAN による同一人物クラスタリング
