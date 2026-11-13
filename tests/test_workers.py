@@ -331,6 +331,52 @@ class SpaceWorkerTest(unittest.TestCase):
         self.assertEqual(r["method"], "pca")
 
 
+class SpaceChunkedTest(unittest.TestCase):
+    """W23: items can be streamed in with add_items and reduced by
+    a separate request, with exactly the one-shot result."""
+
+    def setUp(self):
+        space_worker.handle({"op": "clear"})
+
+    def tearDown(self):
+        space_worker.handle({"op": "clear"})
+
+    def _items(self):
+        rng = np.random.default_rng(9)
+        items = []
+        for person, base_i in enumerate((0, 2)):
+            base = np.zeros(16)
+            base[base_i] = 1.0
+            for i in range(6):
+                v = base + rng.normal(0, 0.03, 16)
+                items.append({"face_id": person * 100 + i, "vector": v.tolist()})
+        return items
+
+    def test_chunked_matches_one_shot(self):
+        items = self._items()
+        for chunk in (items[:5], items[5:9], items[9:]):
+            r = space_worker.handle({"op": "add_items", "items": chunk})
+        self.assertEqual(r["total"], len(items))
+        got = space_worker.handle({"op": "reduce", "method": "pca"})
+        want = space_worker.handle({"items": items, "method": "pca"})
+        self.assertEqual(got, want)
+        # The buffer was consumed: a second reduce sees nothing.
+        again = space_worker.handle({"op": "reduce", "method": "pca"})
+        self.assertEqual(again, {"points": [], "method": "pca"})
+
+    def test_reduce_with_empty_buffer(self):
+        r = space_worker.handle({"op": "reduce", "method": "pca"})
+        self.assertEqual(r, {"points": [], "method": "pca"})
+
+    def test_clear_drops_pending_items(self):
+        items = self._items()
+        space_worker.handle({"op": "add_items", "items": items[:4]})
+        r = space_worker.handle({"op": "clear"})
+        self.assertEqual(r["total"], 0)
+        r = space_worker.handle({"op": "reduce", "method": "pca"})
+        self.assertEqual(r, {"points": [], "method": "pca"})
+
+
 sys.path.insert(0, str(ROOT / "workers" / "facemesh"))
 facemesh_worker = _load("facemesh_worker", ROOT / "workers" / "facemesh" / "worker.py")
 _FACEMESH_MODEL = ROOT / "workers" / "facemesh" / "models" / "face_landmarker.task"

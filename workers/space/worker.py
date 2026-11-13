@@ -10,6 +10,19 @@ Requests:
     faces are present - below that UMAP finds no structure and the
     caller silently gets PCA (the response reports what was used).
 
+  {"op": "add_items", "items": [...]}
+      Accumulate items in the session; answered with {"total": n}.
+      Lets the caller stream a large library in modest chunks
+      instead of one giant JSON line (W23). Items are converted to
+      a float64 array on arrival so the session does not hold the
+      far heavier JSON/list representation.
+  {"op": "reduce", "method": "pca"}
+      Reduce everything accumulated so far (and clear it);
+      answered with the same {"points": ..., "method": ...} as the
+      one-shot form.
+  {"op": "clear"}
+      Drop accumulated items without reducing them.
+
   {"depth": {"image": "<face crop jpg>", "out": "<png to write>"}}
     -> {"depth_ready": true, "path": "<png>"}
     -> {"depth_ready": false, "reason": "..."} when the Depth
@@ -24,7 +37,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import load_image_rgb, run_loop  # noqa: E402
+from common import load_image_rgb, report_progress, run_loop  # noqa: E402
 
 SCALE = 4.2
 UMAP_MIN_POINTS = 20
@@ -65,19 +78,32 @@ def umap3(vectors: np.ndarray):
 
 
 def reduce3(items, method: str):
-    vectors = np.array([it["vector"] for it in items], dtype=np.float64)
+    return reduce3_vectors(
+        [it["face_id"] for it in items],
+        np.array([it["vector"] for it in items], dtype=np.float64),
+        method,
+    )
+
+
+def reduce3_vectors(face_ids, vectors: np.ndarray, method: str):
+    # The reduction itself is one numerical call (an SVD, or a UMAP
+    # fit) with no meaningful sub-steps, so progress is reported as
+    # start/end checkpoints: the start line tells the supervisor the
+    # worker is alive before a long silent computation begins.
+    report_progress(0, 1)
     used = "pca"
     coords = None
-    if method == "umap" and len(items) >= UMAP_MIN_POINTS:
+    if method == "umap" and len(face_ids) >= UMAP_MIN_POINTS:
         coords = umap3(vectors)
         if coords is not None:
             used = "umap"
     if coords is None:
         coords = pca3(vectors)
     points = [
-        {"face_id": it["face_id"], "pos": [round(float(c), 4) for c in row]}
-        for it, row in zip(items, coords)
+        {"face_id": fid, "pos": [round(float(c), 4) for c in row]}
+        for fid, row in zip(face_ids, coords)
     ]
+    report_progress(1, 1)
     return points, used
 
 
@@ -123,10 +149,47 @@ def make_depth(image_path: str, out_path: str) -> dict:
     return {"depth_ready": True, "path": out_path}
 
 
+# Items accumulated via add_items within this worker session, kept
+# as float64 arrays (one per chunk) plus their face ids (W23).
+_pending_ids: list = []
+_pending_vecs: list = []
+
+
+def _take_pending():
+    ids, vecs = _pending_ids[:], _pending_vecs[:]
+    _pending_ids.clear()
+    _pending_vecs.clear()
+    if not vecs:
+        return [], None
+    vectors = vecs[0] if len(vecs) == 1 else np.vstack(vecs)
+    return ids, vectors
+
+
 def handle(req: dict) -> dict:
     if "depth" in req:
         d = req["depth"]
         return make_depth(d["image"], d["out"])
+    op = req.get("op")
+    if op == "add_items":
+        items = req.get("items", [])
+        if items:
+            _pending_ids.extend(it["face_id"] for it in items)
+            _pending_vecs.append(
+                np.array([it["vector"] for it in items], dtype=np.float64)
+            )
+        return {"total": len(_pending_ids)}
+    if op == "clear":
+        _pending_ids.clear()
+        _pending_vecs.clear()
+        return {"total": 0}
+    if op == "reduce":
+        # Take the accumulated items; the buffer is cleared either
+        # way so a failed run cannot leak stale items into the next.
+        ids, vectors = _take_pending()
+        if vectors is None:
+            return {"points": [], "method": "pca"}
+        points, used = reduce3_vectors(ids, vectors, req.get("method", "pca"))
+        return {"points": points, "method": used}
     items = req.get("items", [])
     if not items:
         return {"points": [], "method": "pca"}

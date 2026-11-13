@@ -29,6 +29,8 @@ Rust 側の監督 (core/jobs): ワーカーが一定時間（既定300秒、
               (3D顔プレビュー用、モデルは models/ に同梱)
 - space/      埋め込みの3次元化 (PCA / UMAP) と単眼深度推定
               (Depth Anything V2, 任意)。内蔵3D空間ビュー用。
+              clustering と同じ分割送信 (`add_items` → `reduce`)
+              にも対応（従来の一括形式も可）
               深度モデルは <repo>/models/depth-anything-v2-small.onnx
               または環境変数 DAHLIA_DEPTH_MODEL で指定。
               facemesh は mediapipe (Tasks API) と scipy が必要:
