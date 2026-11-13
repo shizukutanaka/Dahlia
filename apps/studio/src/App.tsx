@@ -7,6 +7,7 @@ import {
   type Asset,
   type Identity,
   type IdentityDetail,
+  type JobProgress,
   type ProcessingFailure,
   type Project,
 } from "./api";
@@ -183,7 +184,30 @@ function ProjectView({
   const [failures, setFailures] = useState<ProcessingFailure[]>([]);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState("");
+  const [progress, setProgress] = useState<JobProgress | null>(null);
   const [error, setError] = useState("");
+
+  // While a job runs, poll its progress (the backend reports
+  // counts through the job hooks) so the user sees how far it is
+  // and can stop it.
+  useEffect(() => {
+    if (!busy) return;
+    let alive = true;
+    const tick = () => {
+      api
+        .jobProgress()
+        .then((p) => {
+          if (alive) setProgress(p);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const t = setInterval(tick, 300);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [busy]);
 
   const loadAssets = useCallback(async () => {
     const list = await api.listAssets(project.id);
@@ -218,11 +242,24 @@ function ProjectView({
     setStatus("");
     try {
       const r = await job();
-      setStatus(done(r));
+      const msg = done(r);
+      if (
+        r &&
+        typeof r === "object" &&
+        "cancelled" in r &&
+        (r as { cancelled: boolean }).cancelled
+      ) {
+        setStatus(
+          "中断しました。ここまで完了した分は保存されています。もう一度実行すると、残りから進みます",
+        );
+      } else {
+        setStatus(msg);
+      }
     } catch (e) {
       setError(`${label}に失敗しました: ${e}`);
     } finally {
       setBusy("");
+      setProgress(null);
       loadFailures();
     }
   }
@@ -346,7 +383,24 @@ function ProjectView({
           >
             👥 人物を分類する
           </button>
-          {busy && <span className="hint">{busy}中…しばらくお待ちください</span>}
+          {busy && (
+            <span className="job-progress">
+              {progress && progress.total > 0 ? (
+                <>
+                  <progress max={progress.total} value={progress.done} />
+                  <span className="hint">
+                    {progress.phase ? `${progress.phase}：` : ""}
+                    {progress.done} / {progress.total}
+                  </span>
+                </>
+              ) : (
+                <span className="hint">{busy}中…しばらくお待ちください</span>
+              )}
+              <button className="mini" onClick={() => api.cancelJob()}>
+                中断する
+              </button>
+            </span>
+          )}
         </div>
         {assets.length === 0 ? (
           <p className="hint">まだ写真がありません。「写真フォルダを追加」から読み込んでください。</p>

@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use dahlia_core::jobs::JobHooks;
 use dahlia_core::storage::{Asset, Db};
 use serde::Serialize;
 
@@ -14,6 +15,9 @@ pub struct ImportReport {
     pub already_present: usize,
     pub failed: usize,
     pub assets: Vec<Asset>,
+    /// The user stopped the import partway; photos registered
+    /// before that point stay registered.
+    pub cancelled: bool,
 }
 
 fn collect_images(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -49,6 +53,16 @@ pub fn import_folder(
     project_id: i64,
     folder: &Path,
 ) -> Result<ImportReport, String> {
+    import_folder_hooked(db, thumbs_dir, project_id, folder, &JobHooks::none())
+}
+
+pub fn import_folder_hooked(
+    db: &Db,
+    thumbs_dir: &Path,
+    project_id: i64,
+    folder: &Path,
+    hooks: &JobHooks,
+) -> Result<ImportReport, String> {
     let mut files = Vec::new();
     collect_images(folder, &mut files);
     files.sort();
@@ -57,7 +71,14 @@ pub fn import_folder(
         .map(|v| v.into_iter().map(|a| a.path).collect())
         .unwrap_or_default();
     let (mut added, mut present, mut failed) = (0usize, 0usize, 0usize);
-    for file in files {
+    let mut cancelled = false;
+    let total = files.len() as u64;
+    hooks.report(0, total, None);
+    for (i, file) in files.into_iter().enumerate() {
+        if hooks.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         let path_str = file.to_string_lossy().to_string();
         let is_new = !existing.contains(&path_str);
         let asset = match db.add_asset(project_id, &path_str, None) {
@@ -72,6 +93,7 @@ pub fn import_folder(
                     &path_str,
                     &crate::errors::friendly(&e.to_string()),
                 );
+                hooks.report(i as u64 + 1, total, None);
                 continue;
             }
         };
@@ -99,6 +121,7 @@ pub fn import_folder(
                 }
             }
         }
+        hooks.report(i as u64 + 1, total, None);
     }
     let assets = db.list_assets(project_id).map_err(|e| e.to_string())?;
     Ok(ImportReport {
@@ -106,5 +129,6 @@ pub fn import_folder(
         already_present: present,
         failed,
         assets,
+        cancelled,
     })
 }

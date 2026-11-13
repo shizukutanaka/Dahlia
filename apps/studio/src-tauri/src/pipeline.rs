@@ -11,13 +11,15 @@
 use std::path::Path;
 
 use dahlia_core::identity::{PreviousIdentity, cosine, match_previous};
-use dahlia_core::jobs::{WorkerConfig, WorkerSession};
+use dahlia_core::jobs::{JobHooks, ProgressInfo, WorkerConfig, WorkerSession};
 use dahlia_core::storage::{Db, ReconciledIdentity};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 pub const EMBED_MODEL: &str = "arcface-mbf";
 const CLUSTER_EPS: f64 = 0.68; // cosine distance; tuned on tests/samples
+/// Faces sent to the clustering worker per add_items request (W22).
+const CLUSTER_CHUNK: usize = 500;
 
 #[derive(Serialize)]
 pub struct DetectReport {
@@ -26,6 +28,9 @@ pub struct DetectReport {
     pub failed: usize,
     /// Assets left alone because detection already ran for them.
     pub skipped: usize,
+    /// The user stopped the job partway; everything counted above
+    /// is saved, and rerunning resumes the rest.
+    pub cancelled: bool,
 }
 
 #[derive(Serialize)]
@@ -34,6 +39,8 @@ pub struct EmbedReport {
     pub failed: usize,
     /// Faces that already had an embedding and were not redone.
     pub skipped: usize,
+    /// The user stopped the job partway (see DetectReport).
+    pub cancelled: bool,
 }
 
 #[derive(Serialize)]
@@ -43,6 +50,9 @@ pub struct ClusterReport {
     pub single_faces: usize,
     /// How many identities kept their previous (user-given) name.
     pub names_carried_over: usize,
+    /// The user stopped the job; the previous identities are
+    /// untouched in that case (they are only replaced at the end).
+    pub cancelled: bool,
 }
 
 fn faces_from(resp: &Value) -> Vec<(dahlia_core::storage::NewFace, Option<Vec<f32>>)> {
@@ -112,7 +122,17 @@ pub fn detect_faces(
     crops_dir: &Path,
     project_id: i64,
 ) -> Result<DetectReport, String> {
-    detect_impl(db, cfg, crops_dir, project_id, false)
+    detect_faces_hooked(db, cfg, crops_dir, project_id, &JobHooks::none())
+}
+
+pub fn detect_faces_hooked(
+    db: &Db,
+    cfg: &WorkerConfig,
+    crops_dir: &Path,
+    project_id: i64,
+    hooks: &JobHooks,
+) -> Result<DetectReport, String> {
+    detect_impl(db, cfg, crops_dir, project_id, false, hooks)
 }
 
 /// Detection that deliberately redoes every photo, including the
@@ -123,7 +143,17 @@ pub fn redetect_faces(
     crops_dir: &Path,
     project_id: i64,
 ) -> Result<DetectReport, String> {
-    detect_impl(db, cfg, crops_dir, project_id, true)
+    redetect_faces_hooked(db, cfg, crops_dir, project_id, &JobHooks::none())
+}
+
+pub fn redetect_faces_hooked(
+    db: &Db,
+    cfg: &WorkerConfig,
+    crops_dir: &Path,
+    project_id: i64,
+    hooks: &JobHooks,
+) -> Result<DetectReport, String> {
+    detect_impl(db, cfg, crops_dir, project_id, true, hooks)
 }
 
 fn detect_impl(
@@ -132,16 +162,25 @@ fn detect_impl(
     crops_dir: &Path,
     project_id: i64,
     force: bool,
+    hooks: &JobHooks,
 ) -> Result<DetectReport, String> {
     let assets = db.list_assets(project_id).map_err(|e| e.to_string())?;
     let mut session = WorkerSession::start(cfg, "face").map_err(|e| e.to_string())?;
     let (mut processed, mut found, mut failed, mut skipped) = (0usize, 0usize, 0usize, 0usize);
-    for asset in &assets {
+    let mut cancelled = false;
+    let total = assets.len() as u64;
+    hooks.report(0, total, None);
+    for (i, asset) in assets.iter().enumerate() {
+        if hooks.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         if asset.detected && !force {
             skipped += 1;
+            hooks.report(i as u64 + 1, total, None);
             continue;
         }
-        match session.call(json!({ "image": asset.path })) {
+        match session.call_hooked(json!({ "image": asset.path }), hooks) {
             Ok(resp) => {
                 let detected = faces_from(&resp);
                 let new_faces: Vec<_> = detected.into_iter().map(|(f, _)| f).collect();
@@ -183,6 +222,10 @@ fn detect_impl(
                 }
             }
             Err(e) => {
+                if matches!(e, dahlia_core::Error::Cancelled) {
+                    cancelled = true;
+                    break;
+                }
                 failed += 1;
                 record(
                     db,
@@ -192,14 +235,21 @@ fn detect_impl(
                     &asset.path,
                     &e.to_string(),
                 );
+                if session.is_broken() {
+                    // Timeout/disconnect: the worker is gone and
+                    // the remaining photos cannot be processed.
+                    return Err(e.to_string());
+                }
             }
         }
+        hooks.report(i as u64 + 1, total, None);
     }
     Ok(DetectReport {
         images_processed: processed,
         faces_found: found,
         failed,
         skipped,
+        cancelled,
     })
 }
 
@@ -208,12 +258,29 @@ pub fn generate_embeddings(
     cfg: &WorkerConfig,
     project_id: i64,
 ) -> Result<EmbedReport, String> {
+    generate_embeddings_hooked(db, cfg, project_id, &JobHooks::none())
+}
+
+pub fn generate_embeddings_hooked(
+    db: &Db,
+    cfg: &WorkerConfig,
+    project_id: i64,
+    hooks: &JobHooks,
+) -> Result<EmbedReport, String> {
     let assets = db.list_assets(project_id).map_err(|e| e.to_string())?;
     let mut session = WorkerSession::start(cfg, "embedding").map_err(|e| e.to_string())?;
     let (mut embedded, mut failed, mut skipped) = (0usize, 0usize, 0usize);
-    for asset in &assets {
+    let mut cancelled = false;
+    let total = assets.len() as u64;
+    hooks.report(0, total, None);
+    for (i, asset) in assets.iter().enumerate() {
+        if hooks.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         let stored = db.list_faces(asset.id).map_err(|e| e.to_string())?;
         if stored.is_empty() {
+            hooks.report(i as u64 + 1, total, None);
             continue;
         }
         // Skip faces that already have an embedding for this model
@@ -226,9 +293,10 @@ pub fn generate_embeddings(
         skipped += done.len();
         if stored.iter().all(|f| done.contains(&f.id)) {
             let _ = db.clear_failure_for(asset.id, "embed");
+            hooks.report(i as u64 + 1, total, None);
             continue;
         }
-        match session.call(json!({ "image": asset.path })) {
+        match session.call_hooked(json!({ "image": asset.path }), hooks) {
             Ok(resp) => {
                 let _ = db.clear_failure_for(asset.id, "embed");
                 for (detected, embedding) in faces_from(&resp) {
@@ -267,6 +335,10 @@ pub fn generate_embeddings(
                 }
             }
             Err(e) => {
+                if matches!(e, dahlia_core::Error::Cancelled) {
+                    cancelled = true;
+                    break;
+                }
                 failed += 1;
                 record(
                     db,
@@ -276,13 +348,18 @@ pub fn generate_embeddings(
                     &asset.path,
                     &e.to_string(),
                 );
+                if session.is_broken() {
+                    return Err(e.to_string());
+                }
             }
         }
+        hooks.report(i as u64 + 1, total, None);
     }
     Ok(EmbedReport {
         embedded,
         failed,
         skipped,
+        cancelled,
     })
 }
 
@@ -312,6 +389,25 @@ pub fn cluster_identities(
     cfg: &WorkerConfig,
     project_id: i64,
 ) -> Result<ClusterReport, String> {
+    cluster_identities_hooked(db, cfg, project_id, &JobHooks::none())
+}
+
+fn cancelled_cluster_report() -> ClusterReport {
+    ClusterReport {
+        identities: 0,
+        clustered_faces: 0,
+        single_faces: 0,
+        names_carried_over: 0,
+        cancelled: true,
+    }
+}
+
+pub fn cluster_identities_hooked(
+    db: &Db,
+    cfg: &WorkerConfig,
+    project_id: i64,
+    hooks: &JobHooks,
+) -> Result<ClusterReport, String> {
     let items = db
         .faces_with_embeddings(project_id, EMBED_MODEL)
         .map_err(|e| e.to_string())?;
@@ -328,13 +424,39 @@ pub fn cluster_identities(
         items.iter().map(|f| (f.face_id, f)).collect();
 
     let mut session = WorkerSession::start(cfg, "clustering").map_err(|e| e.to_string())?;
-    let payload_items: Vec<Value> = items
-        .iter()
-        .map(|f| json!({ "face_id": f.face_id, "vector": f.vector }))
-        .collect();
-    let resp = session
-        .call(json!({ "items": payload_items, "eps": CLUSTER_EPS, "min_samples": 2 }))
-        .map_err(|e| e.to_string())?;
+    // Stream the faces in chunks instead of one giant request
+    // (W22), reporting the send as the first half of the job; the
+    // worker then reports the neighbor search as the second half.
+    let n = items.len() as u64;
+    let mut sent = 0u64;
+    hooks.report(0, 2 * n, Some("データを送信中"));
+    for chunk in items.chunks(CLUSTER_CHUNK) {
+        let payload_items: Vec<Value> = chunk
+            .iter()
+            .map(|f| json!({ "face_id": f.face_id, "vector": f.vector }))
+            .collect();
+        match session.call_hooked(json!({ "op": "add_items", "items": payload_items }), hooks) {
+            Ok(_) => {
+                sent += chunk.len() as u64;
+                hooks.report(sent, 2 * n, Some("データを送信中"));
+            }
+            Err(dahlia_core::Error::Cancelled) => return Ok(cancelled_cluster_report()),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let compute_hooks = hooks.mapped(move |p: ProgressInfo| ProgressInfo {
+        done: n + p.done.min(n),
+        total: 2 * n,
+        phase: Some("分類を計算中".to_string()),
+    });
+    let resp = match session.call_hooked(
+        json!({ "op": "cluster", "eps": CLUSTER_EPS, "min_samples": 2 }),
+        &compute_hooks,
+    ) {
+        Ok(resp) => resp,
+        Err(dahlia_core::Error::Cancelled) => return Ok(cancelled_cluster_report()),
+        Err(e) => return Err(e.to_string()),
+    };
 
     let mut groups: Vec<Vec<i64>> = Vec::new();
     if let Some(clusters) = resp.get("clusters").and_then(|v| v.as_array()) {
@@ -421,5 +543,6 @@ pub fn cluster_identities(
         clustered_faces,
         single_faces,
         names_carried_over,
+        cancelled: false,
     })
 }

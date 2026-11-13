@@ -11,9 +11,10 @@ pub mod pipeline;
 pub mod space;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use dahlia_core::jobs::WorkerConfig;
+use dahlia_core::jobs::{JobHooks, WorkerConfig};
 use dahlia_core::storage::{Asset, Db, Face, Identity, Project};
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -22,6 +23,23 @@ pub struct AppState {
     db: Arc<Db>,
     data_dir: PathBuf,
     workers: WorkerConfig,
+    job: Arc<JobControl>,
+}
+
+/// The long-running job the UI is currently driving (the UI runs
+/// one at a time): a cancel flag its hooks watch, and the latest
+/// progress the frontend polls and displays (W9/W10).
+pub struct JobControl {
+    cancel: Mutex<Option<Arc<AtomicBool>>>,
+    progress: Mutex<Option<JobProgress>>,
+}
+
+#[derive(Serialize, Clone)]
+struct JobProgress {
+    job: String,
+    phase: Option<String>,
+    done: u64,
+    total: u64,
 }
 
 impl AppState {
@@ -31,6 +49,53 @@ impl AppState {
     fn face_crops_dir(&self) -> PathBuf {
         self.data_dir.join("faces")
     }
+
+    /// Start tracking a job: fresh cancel flag, and hooks whose
+    /// progress reports land in the shared slot the UI polls.
+    fn begin_job(&self, name: &str) -> JobHooks {
+        let flag = Arc::new(AtomicBool::new(false));
+        *self.job.cancel.lock().unwrap() = Some(flag.clone());
+        *self.job.progress.lock().unwrap() = Some(JobProgress {
+            job: name.to_string(),
+            phase: None,
+            done: 0,
+            total: 0,
+        });
+        let job = self.job.clone();
+        let name = name.to_string();
+        JobHooks {
+            cancel: Some(flag),
+            progress: Some(Arc::new(move |p: dahlia_core::jobs::ProgressInfo| {
+                if let Ok(mut slot) = job.progress.lock() {
+                    *slot = Some(JobProgress {
+                        job: name.clone(),
+                        phase: p.phase.clone(),
+                        done: p.done,
+                        total: p.total,
+                    });
+                }
+            })),
+        }
+    }
+
+    fn end_job(&self) {
+        *self.job.cancel.lock().unwrap() = None;
+        *self.job.progress.lock().unwrap() = None;
+    }
+}
+
+/// Ask the running job (if any) to stop at the next safe point.
+/// Work already completed stays saved.
+#[tauri::command]
+fn cancel_job(state: State<'_, AppState>) {
+    if let Some(flag) = state.job.cancel.lock().unwrap().as_ref() {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
+#[tauri::command]
+fn job_progress(state: State<'_, AppState>) -> Option<JobProgress> {
+    state.job.progress.lock().unwrap().clone()
 }
 
 fn to_err<T>(r: dahlia_core::Result<T>) -> Result<T, String> {
@@ -125,11 +190,13 @@ async fn import_folder(
 ) -> Result<import::ImportReport, String> {
     let db = state.db.clone();
     let thumbs = state.thumbs_dir();
+    let hooks = state.begin_job("写真の読み込み");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        import::import_folder(&db, &thumbs, project_id, &PathBuf::from(folder))
+        import::import_folder_hooked(&db, &thumbs, project_id, &PathBuf::from(folder), &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;
+    state.end_job();
     friendly(result)
 }
 
@@ -151,11 +218,13 @@ async fn detect_faces(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let crops = state.face_crops_dir();
+    let hooks = state.begin_job("顔の検出");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        pipeline::detect_faces(&db, &workers, &crops, project_id)
+        pipeline::detect_faces_hooked(&db, &workers, &crops, project_id, &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;
+    state.end_job();
     friendly(result)
 }
 
@@ -166,11 +235,13 @@ async fn generate_embeddings(
 ) -> Result<pipeline::EmbedReport, String> {
     let db = state.db.clone();
     let workers = state.workers.clone();
+    let hooks = state.begin_job("特徴量の取得");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        pipeline::generate_embeddings(&db, &workers, project_id)
+        pipeline::generate_embeddings_hooked(&db, &workers, project_id, &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;
+    state.end_job();
     friendly(result)
 }
 
@@ -181,11 +252,13 @@ async fn cluster_identities(
 ) -> Result<pipeline::ClusterReport, String> {
     let db = state.db.clone();
     let workers = state.workers.clone();
+    let hooks = state.begin_job("人物の分類");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        pipeline::cluster_identities(&db, &workers, project_id)
+        pipeline::cluster_identities_hooked(&db, &workers, project_id, &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;
+    state.end_job();
     friendly(result)
 }
 
@@ -287,11 +360,13 @@ async fn redetect_faces(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let crops = state.face_crops_dir();
+    let hooks = state.begin_job("顔の検出（全件）");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        pipeline::redetect_faces(&db, &workers, &crops, project_id)
+        pipeline::redetect_faces_hooked(&db, &workers, &crops, project_id, &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;
+    state.end_job();
     friendly(result)
 }
 
@@ -378,6 +453,10 @@ pub fn run() {
                 db: Arc::new(db),
                 data_dir,
                 workers,
+                job: Arc::new(JobControl {
+                    cancel: Mutex::new(None),
+                    progress: Mutex::new(None),
+                }),
             });
             Ok(())
         })
@@ -403,7 +482,9 @@ pub fn run() {
             move_face_to_identity,
             identity_space,
             face_depth,
-            identity_face_mesh
+            identity_face_mesh,
+            cancel_job,
+            job_progress
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

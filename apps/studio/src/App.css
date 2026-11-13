@@ -218,3 +218,13 @@ button.link {
   min-width: 0;
   font-size: 11.5px;
 }
+
+.job-progress {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.job-progress progress {
+  width: 160px;
+}

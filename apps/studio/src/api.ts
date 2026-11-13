@@ -50,6 +50,14 @@ export interface ImportReport {
   already_present: number;
   failed: number;
   assets: Asset[];
+  cancelled: boolean;
+}
+
+export interface JobProgress {
+  job: string;
+  phase: string | null;
+  done: number;
+  total: number;
 }
 
 export const api = {
@@ -74,19 +82,28 @@ export const api = {
     invoke<Asset[]>("list_assets", { projectId }),
   listFaces: (assetId: number) => invoke<Face[]>("list_faces", { assetId }),
   detectFaces: (projectId: number) =>
-    invoke<{ images_processed: number; faces_found: number; failed: number; skipped: number }>(
-      "detect_faces",
-      { projectId },
-    ),
+    invoke<{
+      images_processed: number;
+      faces_found: number;
+      failed: number;
+      skipped: number;
+      cancelled: boolean;
+    }>("detect_faces", { projectId }),
   redetectFaces: (projectId: number) =>
-    invoke<{ images_processed: number; faces_found: number; failed: number; skipped: number }>(
-      "redetect_faces",
+    invoke<{
+      images_processed: number;
+      faces_found: number;
+      failed: number;
+      skipped: number;
+      cancelled: boolean;
+    }>("redetect_faces", { projectId }),
+  generateEmbeddings: (projectId: number) =>
+    invoke<{ embedded: number; failed: number; skipped: number; cancelled: boolean }>(
+      "generate_embeddings",
       { projectId },
     ),
-  generateEmbeddings: (projectId: number) =>
-    invoke<{ embedded: number; failed: number; skipped: number }>("generate_embeddings", {
-      projectId,
-    }),
+  cancelJob: () => invoke<void>("cancel_job"),
+  jobProgress: () => invoke<JobProgress | null>("job_progress"),
   listFailures: (projectId: number) =>
     invoke<ProcessingFailure[]>("list_failures", { projectId }),
   clearFailures: (projectId: number) =>
@@ -97,6 +114,7 @@ export const api = {
       clustered_faces: number;
       single_faces: number;
       names_carried_over: number;
+      cancelled: boolean;
     }>("cluster_identities", { projectId }),
   listIdentities: (projectId: number) =>
     invoke<Identity[]>("list_identities", { projectId }),
