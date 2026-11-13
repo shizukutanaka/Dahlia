@@ -30,6 +30,11 @@ pub enum Error {
     Worker(String),
     #[error("{0}")]
     NotFound(String),
+    /// The user asked to stop the running job. Work completed so
+    /// far is already saved; this is a normal outcome, not a
+    /// failure.
+    #[error("処理を中断しました")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
