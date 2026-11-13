@@ -1,5 +1,8 @@
 # Architecture
 
+仕様（製品定義・MVP スコープ・Non-Goals）の正本は docs/SPEC.md。
+本書は技術構成の責務分担を定める。
+
 Frontend (React) -> Tauri Commands -> Rust Core (dahlia-core) -> Job Queue -> Python AI Worker -> ONNX Models
 
 - UI から AI 処理を直接呼ばない。必ず Rust Core の Job Queue を経由する。
