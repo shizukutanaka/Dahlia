@@ -307,11 +307,13 @@ async fn identity_space(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let crops = state.face_crops_dir();
+    let hooks = state.begin_job("3D空間の生成");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        space::identity_space(&db, &workers, &crops, project_id)
+        space::identity_space_hooked(&db, &workers, &crops, project_id, &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;
+    state.end_job();
     friendly(result)
 }
 

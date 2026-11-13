@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use dahlia_core::jobs::{JobHooks, ProgressInfo, WorkerConfig};
 use dahlia_core::storage::{Db, NewFace};
-use studio_lib::pipeline;
+use studio_lib::{pipeline, space};
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -272,4 +272,78 @@ fn cluster_cancel_during_send_keeps_previous_identities() {
     .unwrap();
     assert!(!report.cancelled);
     assert_eq!(report.identities, 150);
+}
+
+#[test]
+fn space_streams_chunks_and_reports_both_phases() {
+    let Some(python) = python_with_numpy() else {
+        eprintln!("skipping: no python with numpy");
+        return;
+    };
+    let cfg = WorkerConfig {
+        python,
+        workers_dir: repo_root().join("workers"),
+    };
+    let db = Db::open_in_memory().unwrap();
+    // 600 faces = 150 people x 4: more than one 500-item chunk (W23).
+    let project_id = project_with_embeddings(&db, 150, 4);
+    let crops = std::env::temp_dir().join("dahlia-progress-crops");
+    let log: ProgressLog = Arc::new(Mutex::new(Vec::new()));
+    let hooks = recording_hooks(&log, None);
+
+    let data = space::identity_space_hooked(&db, &cfg, &crops, project_id, &hooks).unwrap();
+    assert_eq!(data.points.len(), 600);
+    assert_eq!(data.method, "pca");
+
+    let events = log.lock().unwrap();
+    assert!(
+        events.iter().any(|p| p.phase.as_deref() == Some("データを送信中") && p.done == 600 && p.total == 1200),
+        "send phase must reach 600/1200: {events:?}"
+    );
+    let last = events.last().unwrap();
+    assert_eq!(last.phase.as_deref(), Some("空間を計算中"));
+    assert_eq!((last.done, last.total), (1200, 1200));
+    assert!(events.windows(2).all(|w| w[0].done <= w[1].done), "progress must not go backwards");
+}
+
+#[test]
+fn space_cancel_during_send_aborts_cleanly() {
+    let Some(python) = python_with_numpy() else {
+        eprintln!("skipping: no python with numpy");
+        return;
+    };
+    let cfg = WorkerConfig {
+        python,
+        workers_dir: repo_root().join("workers"),
+    };
+    let db = Db::open_in_memory().unwrap();
+    let project_id = project_with_embeddings(&db, 150, 4);
+    let crops = std::env::temp_dir().join("dahlia-progress-crops");
+    let flag = Arc::new(AtomicBool::new(false));
+    let flag2 = flag.clone();
+    let hooks = JobHooks {
+        cancel: Some(flag.clone()),
+        progress: Some(Arc::new(move |p: ProgressInfo| {
+            if p.done >= 500 {
+                flag2.store(true, Ordering::Relaxed);
+            }
+        })),
+    };
+
+    let err = match space::identity_space_hooked(&db, &cfg, &crops, project_id, &hooks) {
+        Ok(_) => panic!("cancelled space computation must not succeed"),
+        Err(e) => e,
+    };
+    assert!(err.contains("中断"), "unexpected error: {err}");
+    // Nothing was persisted by the space computation, and a later
+    // full run proceeds normally (no state leaked anywhere).
+    let data = space::identity_space_hooked(
+        &db,
+        &cfg,
+        &crops,
+        project_id,
+        &recording_hooks(&Arc::new(Mutex::new(Vec::new())), None),
+    )
+    .unwrap();
+    assert_eq!(data.points.len(), 600);
 }

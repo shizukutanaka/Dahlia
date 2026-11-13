@@ -8,12 +8,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use dahlia_core::jobs::{WorkerConfig, WorkerSession};
+use dahlia_core::jobs::{JobHooks, ProgressInfo, WorkerConfig, WorkerSession};
 use dahlia_core::storage::{Db, Identity};
 use serde::Serialize;
 use serde_json::json;
 
 use crate::pipeline::EMBED_MODEL;
+
+/// Faces sent to the space worker per add_items request (W23).
+const SPACE_CHUNK: usize = 500;
 
 #[derive(Serialize)]
 pub struct SpacePoint {
@@ -37,6 +40,16 @@ pub fn identity_space(
     cfg: &WorkerConfig,
     crops_dir: &Path,
     project_id: i64,
+) -> Result<SpaceData, String> {
+    identity_space_hooked(db, cfg, crops_dir, project_id, &JobHooks::none())
+}
+
+pub fn identity_space_hooked(
+    db: &Db,
+    cfg: &WorkerConfig,
+    crops_dir: &Path,
+    project_id: i64,
+    hooks: &JobHooks,
 ) -> Result<SpaceData, String> {
     let identities = db.list_identities(project_id).map_err(|e| e.to_string())?;
     let items = db
@@ -62,12 +75,32 @@ pub fn identity_space(
         assets.iter().map(|a| (a.id, a.path.clone())).collect();
 
     let mut session = WorkerSession::start(cfg, "space").map_err(|e| e.to_string())?;
-    let payload: Vec<_> = items
-        .iter()
-        .map(|f| json!({ "face_id": f.face_id, "vector": f.vector }))
-        .collect();
+    // Stream the faces in chunks instead of one giant request
+    // (W23), reporting the send as the first half of the job; the
+    // worker then reports the reduction as the second half.
+    // Cancelling mid-send just drops the session: nothing has been
+    // persisted yet, so there is no partial state to clean up.
+    let n = items.len() as u64;
+    let mut sent = 0u64;
+    hooks.report(0, 2 * n, Some("データを送信中"));
+    for chunk in items.chunks(SPACE_CHUNK) {
+        let payload: Vec<_> = chunk
+            .iter()
+            .map(|f| json!({ "face_id": f.face_id, "vector": f.vector }))
+            .collect();
+        session
+            .call_hooked(json!({ "op": "add_items", "items": payload }), hooks)
+            .map_err(|e| e.to_string())?;
+        sent += chunk.len() as u64;
+        hooks.report(sent, 2 * n, Some("データを送信中"));
+    }
+    let compute_hooks = hooks.mapped(move |p: ProgressInfo| ProgressInfo {
+        done: n + (p.done * n / p.total.max(1)).min(n),
+        total: 2 * n,
+        phase: Some("空間を計算中".to_string()),
+    });
     let resp = session
-        .call(json!({ "items": payload, "method": "pca" }))
+        .call_hooked(json!({ "op": "reduce", "method": "pca" }), &compute_hooks)
         .map_err(|e| e.to_string())?;
     let method = resp
         .get("method")
