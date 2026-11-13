@@ -621,7 +621,7 @@ checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
 name = "dahlia-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -3592,7 +3592,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "studio"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "dahlia-core",
  "image",
