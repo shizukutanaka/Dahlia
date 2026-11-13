@@ -13,19 +13,22 @@ pub mod identity;
 #[path = "../jobs/mod.rs"]
 pub mod jobs;
 
+#[path = "../logging/mod.rs"]
+pub mod logging;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("database error: {0}")]
+    #[error("データベースの処理で問題が発生しました: {0}")]
     Sql(#[from] rusqlite::Error),
-    #[error("json error: {0}")]
+    #[error("データの形式で問題が発生しました: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("io error: {0}")]
+    #[error("ファイルの読み書きで問題が発生しました: {0}")]
     Io(#[from] std::io::Error),
-    #[error("worker error: {0}")]
+    #[error("{0}")]
     Worker(String),
-    #[error("not found: {0}")]
+    #[error("{0}")]
     NotFound(String),
 }
 

@@ -24,6 +24,39 @@ pub struct Asset {
     pub project_id: i64,
     pub path: String,
     pub thumbnail: Option<String>,
+    /// True once face detection has completed for this asset, so a
+    /// later detection run can skip it (W17/W20). Reset never happens
+    /// implicitly; a forced re-detect ignores the flag.
+    pub detected: bool,
+}
+
+/// A recorded processing failure: which file failed, at which stage,
+/// and why (user-facing Japanese). Persisted so the user can see the
+/// list after the run and retry (W11).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessingFailure {
+    pub id: i64,
+    pub project_id: i64,
+    pub asset_id: Option<i64>,
+    /// 'import' | 'detect' | 'embed' | 'crop'
+    pub stage: String,
+    /// File path shown to the user.
+    pub target: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+/// Files generated inside the app data directory for a project, so
+/// deleting the project can remove them too.
+pub struct ProjectArtifacts {
+    pub thumbnails: Vec<String>,
+    pub face_ids: Vec<i64>,
+}
+
+/// What removing one asset took with it (for file cleanup).
+pub struct RemovedAsset {
+    pub thumbnail: Option<String>,
+    pub face_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,9 +111,11 @@ pub struct Db {
 }
 
 /// Current database schema version, stored in PRAGMA user_version.
-/// Version 1 is the original V0.1 schema (database/schema.sql). When
-/// the schema changes, bump this and add a migration step in init().
-const SCHEMA_VERSION: i64 = 1;
+/// Version 1 is the original V0.1 schema (database/schema.sql).
+/// Version 2 adds assets.detected (processing skip) and the
+/// processing_failures table (failure visibility). When the schema
+/// changes, bump this and add a migration step in init().
+const SCHEMA_VERSION: i64 = 2;
 
 /// How many startup backups to keep next to the database file.
 const MAX_BACKUPS: usize = 5;
@@ -128,10 +163,47 @@ impl Db {
         }
         conn.execute_batch(SCHEMA)?;
         if version < SCHEMA_VERSION {
-            // Migration steps for future versions run here, oldest
-            // first, before stamping the new version.
+            // Migration steps run here, oldest first, before stamping
+            // the new version. Each step must be safe on a database
+            // created fresh from schema.sql as well as on an older one.
+            if version < 2 {
+                Self::migrate_to_2(conn)?;
+            }
             conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         }
+        Ok(())
+    }
+
+    /// v1 -> v2: assets.detected flag + processing_failures table.
+    fn migrate_to_2(conn: &Connection) -> Result<()> {
+        let has_detected = {
+            let mut stmt = conn.prepare("PRAGMA table_info(assets)")?;
+            let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            let mut found = false;
+            for c in cols {
+                if c? == "detected" {
+                    found = true;
+                }
+            }
+            found
+        };
+        if !has_detected {
+            conn.execute(
+                "ALTER TABLE assets ADD COLUMN detected INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS processing_failures (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                asset_id   INTEGER REFERENCES assets(id) ON DELETE CASCADE,
+                stage      TEXT NOT NULL,
+                target     TEXT NOT NULL,
+                message    TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )?;
         Ok(())
     }
 
@@ -285,7 +357,7 @@ impl Db {
     pub fn create_project(&self, name: &str) -> Result<Project> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(Error::Worker("project name is empty".into()));
+            return Err(Error::Worker("プロジェクト名が空です".into()));
         }
         let conn = self.conn.lock().unwrap();
         conn.execute("INSERT INTO projects (name) VALUES (?1)", params![name])?;
@@ -323,9 +395,9 @@ impl Db {
             params![project_id, path, thumbnail],
         )?;
         Ok(conn.query_row(
-            "SELECT id, project_id, path, thumbnail FROM assets WHERE project_id = ?1 AND path = ?2",
+            "SELECT id, project_id, path, thumbnail, detected FROM assets WHERE project_id = ?1 AND path = ?2",
             params![project_id, path],
-            |r| Ok(Asset { id: r.get(0)?, project_id: r.get(1)?, path: r.get(2)?, thumbnail: r.get(3)? }),
+            |r| Ok(Asset { id: r.get(0)?, project_id: r.get(1)?, path: r.get(2)?, thumbnail: r.get(3)?, detected: r.get::<_, i64>(4)? != 0 }),
         )?)
     }
 
@@ -341,10 +413,10 @@ impl Db {
     pub fn list_assets(&self, project_id: i64) -> Result<Vec<Asset>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, path, thumbnail FROM assets WHERE project_id = ?1 ORDER BY path",
+            "SELECT id, project_id, path, thumbnail, detected FROM assets WHERE project_id = ?1 ORDER BY path",
         )?;
         let rows = stmt.query_map(params![project_id], |r| {
-            Ok(Asset { id: r.get(0)?, project_id: r.get(1)?, path: r.get(2)?, thumbnail: r.get(3)? })
+            Ok(Asset { id: r.get(0)?, project_id: r.get(1)?, path: r.get(2)?, thumbnail: r.get(3)?, detected: r.get::<_, i64>(4)? != 0 })
         })?;
         let mut out = Vec::new();
         for r in rows {
@@ -356,19 +428,142 @@ impl Db {
     pub fn get_asset(&self, asset_id: i64) -> Result<Asset> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.query_row(
-            "SELECT id, project_id, path, thumbnail FROM assets WHERE id = ?1",
+            "SELECT id, project_id, path, thumbnail, detected FROM assets WHERE id = ?1",
             params![asset_id],
-            |r| Ok(Asset { id: r.get(0)?, project_id: r.get(1)?, path: r.get(2)?, thumbnail: r.get(3)? }),
-        ).map_err(|_| Error::NotFound(format!("asset {asset_id}")))?)
+            |r| Ok(Asset { id: r.get(0)?, project_id: r.get(1)?, path: r.get(2)?, thumbnail: r.get(3)?, detected: r.get::<_, i64>(4)? != 0 }),
+        ).map_err(|_| Error::NotFound(format!("写真 {asset_id} が見つかりません")))?)
+    }
+
+    // ---------------- processing failures ----------------
+
+    /// Record (or refresh) a processing failure so it stays visible
+    /// in the UI until the stage succeeds or the user clears it.
+    /// The same (project, stage, target) is kept only once.
+    pub fn record_failure(
+        &self,
+        project_id: i64,
+        asset_id: Option<i64>,
+        stage: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM processing_failures \
+             WHERE project_id = ?1 AND stage = ?2 AND target = ?3",
+            params![project_id, stage, target],
+        )?;
+        conn.execute(
+            "INSERT INTO processing_failures (project_id, asset_id, stage, target, message) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project_id, asset_id, stage, target, message],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_failures(&self, project_id: i64) -> Result<Vec<ProcessingFailure>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, asset_id, stage, target, message, created_at \
+             FROM processing_failures WHERE project_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![project_id], |r| {
+            Ok(ProcessingFailure {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                asset_id: r.get(2)?,
+                stage: r.get(3)?,
+                target: r.get(4)?,
+                message: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Clear the recorded failures of one asset at one stage — called
+    /// when that stage succeeds for the asset on a later run.
+    pub fn clear_failure_for(&self, asset_id: i64, stage: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM processing_failures WHERE asset_id = ?1 AND stage = ?2",
+            params![asset_id, stage],
+        )?;
+        Ok(())
+    }
+
+    /// Clear every recorded failure of a project (user action).
+    pub fn clear_failures(&self, project_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM processing_failures WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        Ok(())
+    }
+
+    // ---------------- deletion ----------------
+
+    /// Generated files belonging to a project (thumbnail paths and
+    /// face IDs, whose crops live at faces/<face_id>.jpg), collected
+    /// before the rows disappear so the caller can remove the files.
+    pub fn project_artifacts(&self, project_id: i64) -> Result<ProjectArtifacts> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT thumbnail FROM assets WHERE project_id = ?1 AND thumbnail IS NOT NULL",
+        )?;
+        let thumbs = stmt
+            .query_map(params![project_id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut stmt = conn.prepare(
+            "SELECT f.id FROM faces f JOIN assets a ON a.id = f.asset_id \
+             WHERE a.project_id = ?1",
+        )?;
+        let face_ids = stmt
+            .query_map(params![project_id], |r| r.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ProjectArtifacts { thumbnails: thumbs, face_ids })
+    }
+
+    /// Delete a project and everything registered under it (assets,
+    /// faces, embeddings, identities, failures) via ON DELETE
+    /// CASCADE. The original photo files on disk are NOT touched.
+    pub fn delete_project(&self, project_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("プロジェクト {project_id} が見つかりません")));
+        }
+        Ok(())
+    }
+
+    /// Remove one photo's registration (its faces, embeddings and
+    /// identity links go with it). The original file is NOT touched.
+    /// Returns what the caller needs to clean up generated files.
+    pub fn remove_asset(&self, asset_id: i64) -> Result<RemovedAsset> {
+        let asset = self.get_asset(asset_id)?;
+        let face_ids: Vec<i64> =
+            self.list_faces(asset_id)?.iter().map(|f| f.id).collect();
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM assets WHERE id = ?1", params![asset_id])?;
+        Ok(RemovedAsset { thumbnail: asset.thumbnail, face_ids })
     }
 
     // ---------------- faces & embeddings ----------------
 
     /// Replace all faces of an asset with fresh detection results.
+    /// Also marks the asset as detection-processed, so later runs can
+    /// skip it (the caller uses a forced run to redo it on purpose).
     pub fn replace_faces(&self, asset_id: i64, faces: &[NewFace]) -> Result<Vec<Face>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM faces WHERE asset_id = ?1", params![asset_id])?;
+        tx.execute("UPDATE assets SET detected = 1 WHERE id = ?1", params![asset_id])?;
         let mut out = Vec::new();
         for f in faces {
             let bbox = serde_json::to_string(&f.bbox)?;
@@ -435,6 +630,22 @@ impl Db {
                 .collect();
             Ok(FaceEmbedding { face_id: r.get(0)?, asset_id: r.get(1)?, confidence: r.get(2)?, vector })
         })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Face IDs of one asset that already have an embedding for
+    /// `model` — the skip set for the embedding stage (W20).
+    pub fn embedded_face_ids(&self, asset_id: i64, model: &str) -> Result<Vec<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT e.face_id FROM embeddings e JOIN faces f ON f.id = e.face_id \
+             WHERE f.asset_id = ?1 AND e.model = ?2",
+        )?;
+        let rows = stmt.query_map(params![asset_id, model], |r| r.get::<_, i64>(0))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -511,15 +722,14 @@ impl Db {
 
         if items.is_empty() && !existing_ids.is_empty() {
             return Err(Error::Worker(
-                "refusing to replace existing identities with an empty clustering result"
-                    .into(),
+                "分類結果が空のため、登録済みの人物データを守って処理を中止しました".into(),
             ));
         }
         for item in items {
             if let Some(keep) = item.keep_id {
                 if !existing_ids.contains(&keep) {
                     return Err(Error::Worker(format!(
-                        "identity {keep} does not belong to project {project_id}"
+                        "人物 {keep} はプロジェクト {project_id} に属していません"
                     )));
                 }
             }
@@ -627,13 +837,76 @@ impl Db {
              WHERE i.id = ?1 GROUP BY i.id",
             params![identity_id],
             |r| Ok(Identity { id: r.get(0)?, project_id: r.get(1)?, name: r.get(2)?, quality_score: r.get(3)?, face_count: r.get(4)? }),
-        ).map_err(|_| Error::NotFound(format!("identity {identity_id}")))?)
+        ).map_err(|_| Error::NotFound(format!("人物 {identity_id} が見つかりません")))?)
+    }
+
+    /// Merge `source_id` into `target_id`: every face of the source
+    /// becomes a face of the target and the source identity is
+    /// removed (W63 — the way to fix a person split in two by
+    /// clustering). Both must belong to the same project.
+    pub fn merge_identities(&self, target_id: i64, source_id: i64) -> Result<()> {
+        if target_id == source_id {
+            return Err(Error::Worker("同じ人物同士は統合できません".into()));
+        }
+        let target = self.get_identity(target_id)?;
+        let source = self.get_identity(source_id)?;
+        if target.project_id != source.project_id {
+            return Err(Error::Worker(
+                "別のプロジェクトの人物とは統合できません".into(),
+            ));
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO identity_faces (identity_id, face_id) \
+             SELECT ?1, face_id FROM identity_faces WHERE identity_id = ?2",
+            params![target_id, source_id],
+        )?;
+        tx.execute("DELETE FROM identity_faces WHERE identity_id = ?1", params![source_id])?;
+        tx.execute("DELETE FROM identities WHERE id = ?1", params![source_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Move one face to another identity (W63 — fixing a face that
+    /// clustering attached to the wrong person). The face leaves
+    /// whichever identity of the same project currently holds it.
+    pub fn move_face_to_identity(&self, face_id: i64, target_identity_id: i64) -> Result<()> {
+        let target = self.get_identity(target_identity_id)?;
+        let conn = self.conn.lock().unwrap();
+        // The face's project, via its asset; also proves the face exists.
+        let face_project: i64 = conn
+            .query_row(
+                "SELECT a.project_id FROM faces f JOIN assets a ON a.id = f.asset_id \
+                 WHERE f.id = ?1",
+                params![face_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| Error::NotFound(format!("顔 {face_id} が見つかりません")))?;
+        if face_project != target.project_id {
+            return Err(Error::Worker(
+                "別のプロジェクトの人物には顔を移動できません".into(),
+            ));
+        }
+        let mut conn = conn;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM identity_faces WHERE face_id = ?1 AND identity_id IN \
+             (SELECT id FROM identities WHERE project_id = ?2)",
+            params![face_id, target.project_id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO identity_faces (identity_id, face_id) VALUES (?1, ?2)",
+            params![target_identity_id, face_id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn rename_identity(&self, identity_id: i64, name: &str) -> Result<()> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(Error::Worker("identity name is empty".into()));
+            return Err(Error::Worker("人物の名前が空です".into()));
         }
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -893,6 +1166,127 @@ mod tests {
             .flatten()
             .any(|e| e.file_name().to_string_lossy().contains("corrupt-"));
         assert!(preserved);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn failures_are_recorded_listed_and_cleared() {
+        let db = Db::open_in_memory().unwrap();
+        let p = db.create_project("P").unwrap();
+        let a = db.add_asset(p.id, "/bad.jpg", None).unwrap();
+        db.record_failure(p.id, Some(a.id), "detect", "/bad.jpg", "読み取れませんでした")
+            .unwrap();
+        // Recording the same target again refreshes instead of duplicating.
+        db.record_failure(p.id, Some(a.id), "detect", "/bad.jpg", "別の理由")
+            .unwrap();
+        let fails = db.list_failures(p.id).unwrap();
+        assert_eq!(fails.len(), 1);
+        assert_eq!(fails[0].message, "別の理由");
+        assert_eq!(fails[0].asset_id, Some(a.id));
+        db.clear_failure_for(a.id, "detect").unwrap();
+        assert!(db.list_failures(p.id).unwrap().is_empty());
+        db.record_failure(p.id, None, "import", "/x.jpg", "失敗").unwrap();
+        db.clear_failures(p.id).unwrap();
+        assert!(db.list_failures(p.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn detected_flag_and_embedded_skip_sets() {
+        let db = Db::open_in_memory().unwrap();
+        let p = db.create_project("P").unwrap();
+        let a = db.add_asset(p.id, "/x.jpg", None).unwrap();
+        assert!(!db.get_asset(a.id).unwrap().detected);
+        let faces = db
+            .replace_faces(a.id, &[NewFace { bbox: [0.0; 4], confidence: 0.9 }])
+            .unwrap();
+        assert!(db.get_asset(a.id).unwrap().detected, "replace_faces marks detection done");
+        assert!(db.embedded_face_ids(a.id, "m").unwrap().is_empty());
+        db.save_embedding(faces[0].id, "m", &[0.1]).unwrap();
+        assert_eq!(db.embedded_face_ids(a.id, "m").unwrap(), vec![faces[0].id]);
+        assert!(db.embedded_face_ids(a.id, "other-model").unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_project_cascades_and_remove_asset_returns_artifacts() {
+        let db = Db::open_in_memory().unwrap();
+        let p = db.create_project("P").unwrap();
+        let a = db.add_asset(p.id, "/x.jpg", Some("/thumbs/1.jpg")).unwrap();
+        let f = db
+            .replace_faces(a.id, &[NewFace { bbox: [0.0; 4], confidence: 0.9 }])
+            .unwrap();
+        db.replace_identities(p.id, &[NewIdentity {
+            name: "A".into(),
+            quality_score: 0.5,
+            face_ids: vec![f[0].id],
+        }])
+        .unwrap();
+        db.record_failure(p.id, Some(a.id), "detect", "/x.jpg", "失敗").unwrap();
+
+        let artifacts = db.project_artifacts(p.id).unwrap();
+        assert_eq!(artifacts.thumbnails, vec!["/thumbs/1.jpg".to_string()]);
+        assert_eq!(artifacts.face_ids, vec![f[0].id]);
+
+        let removed = db.remove_asset(a.id).unwrap();
+        assert_eq!(removed.face_ids, vec![f[0].id]);
+        assert_eq!(removed.thumbnail.as_deref(), Some("/thumbs/1.jpg"));
+        assert!(db.list_assets(p.id).unwrap().is_empty());
+        assert!(db.list_faces(a.id).unwrap().is_empty());
+        // The identity lost its only face link but the row remains.
+        assert_eq!(db.list_identities(p.id).unwrap()[0].face_count, 0);
+
+        db.delete_project(p.id).unwrap();
+        assert!(db.list_projects().unwrap().is_empty());
+        assert!(db.list_failures(p.id).unwrap().is_empty());
+        assert!(db.delete_project(p.id).is_err(), "deleting twice is an error");
+    }
+
+    #[test]
+    fn merge_and_move_faces_fix_misclassification() {
+        let db = Db::open_in_memory().unwrap();
+        let p = db.create_project("P").unwrap();
+        let f = fresh_faces(&db, p.id, 4);
+        let ids = db
+            .replace_identities(p.id, &[
+                NewIdentity { name: "Alice".into(), quality_score: 0.9, face_ids: vec![f[0], f[1], f[2]] },
+                NewIdentity { name: "Alice(重複)".into(), quality_score: 0.4, face_ids: vec![f[3]] },
+            ])
+            .unwrap();
+        // Move one wrongly-grouped face, then merge the split person.
+        db.move_face_to_identity(f[2], ids[1].id).unwrap();
+        assert_eq!(db.identity_face_ids(ids[0].id).unwrap(), vec![f[0], f[1]]);
+        assert_eq!(db.identity_face_ids(ids[1].id).unwrap(), vec![f[2], f[3]]);
+        db.merge_identities(ids[0].id, ids[1].id).unwrap();
+        let listed = db.list_identities(p.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].face_count, 4);
+        assert!(db.merge_identities(ids[0].id, ids[0].id).is_err());
+        assert!(db.move_face_to_identity(99999, ids[0].id).is_err());
+    }
+
+    #[test]
+    fn v1_database_is_migrated_to_v2() {
+        let path = temp_db_path("migrate");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        {
+            // Hand-build a v1 database: assets without `detected`,
+            // no processing_failures, user_version = 1.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+                 CREATE TABLE assets (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, path TEXT NOT NULL, thumbnail TEXT, UNIQUE(project_id, path));
+                 INSERT INTO projects (name) VALUES ('Old');
+                 INSERT INTO assets (project_id, path) VALUES (1, '/old.jpg');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 2);
+        let assets = db.list_assets(1).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert!(!assets[0].detected);
+        assert!(db.table_names().unwrap().contains(&"processing_failures".to_string()));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

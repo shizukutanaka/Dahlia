@@ -76,7 +76,7 @@ impl WorkerSession {
         let script = cfg.worker_script(worker);
         if !script.exists() {
             return Err(Error::Worker(format!(
-                "worker script not found: {}",
+                "AI処理の部品（ワーカー）が見つかりません: {}",
                 script.display()
             )));
         }
@@ -87,7 +87,7 @@ impl WorkerSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| Error::Worker(format!("failed to start python worker '{worker}': {e}")))?;
+            .map_err(|e| Error::Worker(format!("Python（AI処理の実行環境）を起動できませんでした（{worker}）: {e}")))?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         Ok(Self { child, stdin, stdout, next_id: 0 })
@@ -101,14 +101,14 @@ impl WorkerSession {
             obj.insert("id".into(), Value::from(id));
         }
         let line = serde_json::to_string(&request)?;
-        writeln!(self.stdin, "{line}").map_err(|e| Error::Worker(format!("worker write: {e}")))?;
+        writeln!(self.stdin, "{line}").map_err(|e| Error::Worker(format!("ワーカーへの送信に失敗しました: {e}")))?;
         self.stdin.flush().ok();
 
         let mut buf = String::new();
         let n = self.stdout.read_line(&mut buf)
-            .map_err(|e| Error::Worker(format!("worker read: {e}")))?;
+            .map_err(|e| Error::Worker(format!("ワーカーからの応答の読み取りに失敗しました: {e}")))?;
         if n == 0 {
-            return Err(Error::Worker("worker closed the connection unexpectedly".into()));
+            return Err(Error::Worker("処理中にワーカーが終了してしまいました".into()));
         }
         let resp: Value = serde_json::from_str(buf.trim())?;
         if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
@@ -117,7 +117,7 @@ impl WorkerSession {
             let msg = resp
                 .get("error")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown worker error")
+                .unwrap_or("ワーカーが不明なエラーを返しました")
                 .to_string();
             Err(Error::Worker(msg))
         }
