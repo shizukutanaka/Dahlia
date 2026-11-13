@@ -5,6 +5,7 @@
 
 pub mod errors;
 pub mod facemesh;
+pub mod heif;
 pub mod import;
 pub mod orient;
 pub mod pipeline;
@@ -48,6 +49,10 @@ impl AppState {
     }
     fn face_crops_dir(&self) -> PathBuf {
         self.data_dir.join("faces")
+    }
+    /// JPEG working copies of HEIC photos (W87), keyed by asset id.
+    fn proxies_dir(&self) -> PathBuf {
+        self.data_dir.join("proxies")
     }
 
     /// Start tracking a job: fresh cancel flag, and hooks whose
@@ -189,10 +194,20 @@ async fn import_folder(
     folder: String,
 ) -> Result<import::ImportReport, String> {
     let db = state.db.clone();
+    let workers = state.workers.clone();
     let thumbs = state.thumbs_dir();
+    let proxies = state.proxies_dir();
     let hooks = state.begin_job("写真の読み込み");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        import::import_folder_hooked(&db, &thumbs, project_id, &PathBuf::from(folder), &hooks)
+        import::import_folder_hooked(
+            &db,
+            &workers,
+            &thumbs,
+            &proxies,
+            project_id,
+            &PathBuf::from(folder),
+            &hooks,
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -218,9 +233,10 @@ async fn detect_faces(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let crops = state.face_crops_dir();
+    let proxies = state.proxies_dir();
     let hooks = state.begin_job("顔の検出");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        pipeline::detect_faces_hooked(&db, &workers, &crops, project_id, &hooks)
+        pipeline::detect_faces_hooked(&db, &workers, &crops, &proxies, project_id, &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -362,9 +378,10 @@ async fn redetect_faces(
     let db = state.db.clone();
     let workers = state.workers.clone();
     let crops = state.face_crops_dir();
+    let proxies = state.proxies_dir();
     let hooks = state.begin_job("顔の検出（全件）");
     let result = tauri::async_runtime::spawn_blocking(move || {
-        pipeline::redetect_faces_hooked(&db, &workers, &crops, project_id, &hooks)
+        pipeline::redetect_faces_hooked(&db, &workers, &crops, &proxies, project_id, &hooks)
     })
     .await
     .map_err(|e| e.to_string())?;

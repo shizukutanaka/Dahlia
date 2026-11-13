@@ -34,7 +34,7 @@ fn identity_face_mesh_on_samples() {
     for name in ["einstein_a.jpg", "einstein_b.jpg"] {
         db.add_asset(project.id, samples.join(name).to_str().unwrap(), None).unwrap();
     }
-    pipeline::detect_faces(&db, &cfg, &data_dir.join("faces"), project.id).unwrap();
+    pipeline::detect_faces(&db, &cfg, &data_dir.join("faces"), &data_dir.join("proxies"), project.id).unwrap();
     pipeline::generate_embeddings(&db, &cfg, project.id).unwrap();
     pipeline::cluster_identities(&db, &cfg, project.id).unwrap();
     let identities = db.list_identities(project.id).unwrap();

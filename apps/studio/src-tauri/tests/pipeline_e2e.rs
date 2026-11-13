@@ -42,7 +42,7 @@ fn full_pipeline_on_samples() {
     }
 
     // Phase 6: detection
-    let report = pipeline::detect_faces(&db, &cfg, &crops, project.id).unwrap();
+    let report = pipeline::detect_faces(&db, &cfg, &crops, &crops.join("proxies"), project.id).unwrap();
     assert_eq!(report.failed, 0);
     assert_eq!(report.faces_found, 3, "one face per portrait, none in landscape");
     assert_eq!(db.list_faces(asset_ids[3]).unwrap().len(), 0);

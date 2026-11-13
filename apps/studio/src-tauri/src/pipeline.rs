@@ -8,7 +8,7 @@
 //!                          matched to stored faces by bbox center)
 //!   cluster_identities  -> identities (DBSCAN) + quality scores
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dahlia_core::identity::{PreviousIdentity, cosine, match_previous};
 use dahlia_core::jobs::{JobHooks, ProgressInfo, WorkerConfig, WorkerSession};
@@ -120,19 +120,21 @@ pub fn detect_faces(
     db: &Db,
     cfg: &WorkerConfig,
     crops_dir: &Path,
+    proxies_dir: &Path,
     project_id: i64,
 ) -> Result<DetectReport, String> {
-    detect_faces_hooked(db, cfg, crops_dir, project_id, &JobHooks::none())
+    detect_faces_hooked(db, cfg, crops_dir, proxies_dir, project_id, &JobHooks::none())
 }
 
 pub fn detect_faces_hooked(
     db: &Db,
     cfg: &WorkerConfig,
     crops_dir: &Path,
+    proxies_dir: &Path,
     project_id: i64,
     hooks: &JobHooks,
 ) -> Result<DetectReport, String> {
-    detect_impl(db, cfg, crops_dir, project_id, false, hooks)
+    detect_impl(db, cfg, crops_dir, proxies_dir, project_id, false, hooks)
 }
 
 /// Detection that deliberately redoes every photo, including the
@@ -141,25 +143,28 @@ pub fn redetect_faces(
     db: &Db,
     cfg: &WorkerConfig,
     crops_dir: &Path,
+    proxies_dir: &Path,
     project_id: i64,
 ) -> Result<DetectReport, String> {
-    redetect_faces_hooked(db, cfg, crops_dir, project_id, &JobHooks::none())
+    redetect_faces_hooked(db, cfg, crops_dir, proxies_dir, project_id, &JobHooks::none())
 }
 
 pub fn redetect_faces_hooked(
     db: &Db,
     cfg: &WorkerConfig,
     crops_dir: &Path,
+    proxies_dir: &Path,
     project_id: i64,
     hooks: &JobHooks,
 ) -> Result<DetectReport, String> {
-    detect_impl(db, cfg, crops_dir, project_id, true, hooks)
+    detect_impl(db, cfg, crops_dir, proxies_dir, project_id, true, hooks)
 }
 
 fn detect_impl(
     db: &Db,
     cfg: &WorkerConfig,
     crops_dir: &Path,
+    proxies_dir: &Path,
     project_id: i64,
     force: bool,
     hooks: &JobHooks,
@@ -189,10 +194,32 @@ fn detect_impl(
                         processed += 1;
                         found += saved.len();
                         let _ = db.clear_failure_for(asset.id, "detect");
+                        // Crops are cut by the image crate, which
+                        // cannot decode HEIC: for those photos cut
+                        // from the JPEG proxy instead (converted on
+                        // demand if import did not make one, W87).
+                        // The proxy holds the same oriented pixels
+                        // the worker detected on.
+                        let crop_src = if crate::heif::is_heif_path(Path::new(&asset.path)) {
+                            let _ = crate::heif::ensure_proxies(
+                                cfg,
+                                proxies_dir,
+                                &[(asset.id, PathBuf::from(&asset.path))],
+                            );
+                            crate::heif::raster_path(
+                                proxies_dir,
+                                asset.id,
+                                Path::new(&asset.path),
+                            )
+                            .to_string_lossy()
+                            .into_owned()
+                        } else {
+                            asset.path.clone()
+                        };
                         let mut crop_error: Option<String> = None;
                         for face in &saved {
                             if let Err(e) = save_crop(
-                                &asset.path,
+                                &crop_src,
                                 face.bbox,
                                 &crops_dir.join(format!("{}.jpg", face.id)),
                             ) {

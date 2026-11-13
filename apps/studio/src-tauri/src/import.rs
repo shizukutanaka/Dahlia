@@ -3,11 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use dahlia_core::jobs::JobHooks;
+use dahlia_core::jobs::{JobHooks, WorkerConfig};
 use dahlia_core::storage::{Asset, Db};
 use serde::Serialize;
 
-const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif"];
+const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "heic", "heif"];
 
 #[derive(Serialize)]
 pub struct ImportReport {
@@ -49,16 +49,28 @@ fn make_thumbnail(src: &Path, dest: &Path) -> Result<(), String> {
 
 pub fn import_folder(
     db: &Db,
+    cfg: &WorkerConfig,
     thumbs_dir: &Path,
+    proxies_dir: &Path,
     project_id: i64,
     folder: &Path,
 ) -> Result<ImportReport, String> {
-    import_folder_hooked(db, thumbs_dir, project_id, folder, &JobHooks::none())
+    import_folder_hooked(
+        db,
+        cfg,
+        thumbs_dir,
+        proxies_dir,
+        project_id,
+        folder,
+        &JobHooks::none(),
+    )
 }
 
 pub fn import_folder_hooked(
     db: &Db,
+    cfg: &WorkerConfig,
     thumbs_dir: &Path,
+    proxies_dir: &Path,
     project_id: i64,
     folder: &Path,
     hooks: &JobHooks,
@@ -72,6 +84,10 @@ pub fn import_folder_hooked(
         .unwrap_or_default();
     let (mut added, mut present, mut failed) = (0usize, 0usize, 0usize);
     let mut cancelled = false;
+    // HEIC photos whose thumbnails must wait for a JPEG proxy
+    // (the image crate cannot decode HEIC itself, W87). Converted
+    // in one batch after the registration loop.
+    let mut pending_heif: Vec<(i64, PathBuf)> = Vec::new();
     let total = files.len() as u64;
     hooks.report(0, total, None);
     for (i, file) in files.into_iter().enumerate() {
@@ -102,7 +118,9 @@ pub fn import_folder_hooked(
         } else {
             present += 1;
         }
-        if asset.thumbnail.is_none() {
+        if asset.thumbnail.is_none() && crate::heif::is_heif_path(&file) {
+            pending_heif.push((asset.id, file.clone()));
+        } else if asset.thumbnail.is_none() {
             let dest = thumbs_dir.join(format!("{}.jpg", asset.id));
             match make_thumbnail(&file, &dest) {
                 Ok(()) => {
@@ -122,6 +140,41 @@ pub fn import_folder_hooked(
             }
         }
         hooks.report(i as u64 + 1, total, None);
+    }
+    // HEIC proxies + thumbnails. Skipped when the user cancelled:
+    // the assets stay registered without thumbnails, and the next
+    // import of the same folder picks them up again here.
+    if !cancelled && !pending_heif.is_empty() {
+        let pending_total = pending_heif.len() as u64;
+        hooks.report(0, pending_total, Some("HEIC変換"));
+        let results = crate::heif::ensure_proxies(cfg, proxies_dir, &pending_heif);
+        for (done, ((asset_id, file), (_, result))) in
+            pending_heif.iter().zip(results.iter()).enumerate()
+        {
+            let path_str = file.to_string_lossy().to_string();
+            let dest = thumbs_dir.join(format!("{asset_id}.jpg"));
+            let thumb_result = match result {
+                Ok(proxy) => make_thumbnail(proxy, &dest),
+                Err(conv_err) => Err(conv_err.clone()),
+            };
+            match thumb_result {
+                Ok(()) => {
+                    let _ = db.set_asset_thumbnail(*asset_id, &dest.to_string_lossy());
+                    let _ = db.clear_failure_for(*asset_id, "import");
+                }
+                Err(e) => {
+                    failed += 1;
+                    let _ = db.record_failure(
+                        project_id,
+                        Some(*asset_id),
+                        "import",
+                        &path_str,
+                        &crate::errors::friendly(&e),
+                    );
+                }
+            }
+            hooks.report(done as u64 + 1, pending_total, Some("HEIC変換"));
+        }
     }
     let assets = db.list_assets(project_id).map_err(|e| e.to_string())?;
     Ok(ImportReport {

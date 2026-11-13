@@ -101,10 +101,11 @@ fn detect_reports_progress_and_completes() {
     let db = Db::open_in_memory().unwrap();
     let (project_id, _) = project_with_assets(&db, 4);
     let crops = std::env::temp_dir().join("dahlia-progress-crops");
+    let proxies = crops.join("proxies");
     let log: ProgressLog = Arc::new(Mutex::new(Vec::new()));
     let hooks = recording_hooks(&log, None);
 
-    let report = pipeline::detect_faces_hooked(&db, &cfg, &crops, project_id, &hooks).unwrap();
+    let report = pipeline::detect_faces_hooked(&db, &cfg, &crops, &proxies, project_id, &hooks).unwrap();
     assert!(!report.cancelled);
     assert_eq!(report.images_processed, 4);
     assert_eq!(report.faces_found, 4);
@@ -123,6 +124,7 @@ fn detect_cancel_stops_safely_with_partial_results_saved() {
     let db = Db::open_in_memory().unwrap();
     let (project_id, asset_ids) = project_with_assets(&db, 10);
     let crops = std::env::temp_dir().join("dahlia-progress-crops");
+    let proxies = crops.join("proxies");
     // The progress sink itself pulls the brake once 3 photos are
     // done — the same thing the UI's cancel button does.
     let flag = Arc::new(AtomicBool::new(false));
@@ -136,7 +138,7 @@ fn detect_cancel_stops_safely_with_partial_results_saved() {
         })),
     };
 
-    let report = pipeline::detect_faces_hooked(&db, &cfg, &crops, project_id, &hooks).unwrap();
+    let report = pipeline::detect_faces_hooked(&db, &cfg, &crops, &proxies, project_id, &hooks).unwrap();
     assert!(report.cancelled, "report must say the job was cancelled");
     assert_eq!(report.images_processed, 3);
     // The 3 finished photos kept their faces; the rest are untouched.
@@ -149,6 +151,7 @@ fn detect_cancel_stops_safely_with_partial_results_saved() {
         &db,
         &cfg,
         &crops,
+        &proxies,
         project_id,
         &recording_hooks(&Arc::new(Mutex::new(Vec::new())), None),
     )
