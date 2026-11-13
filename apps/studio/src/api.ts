@@ -43,7 +43,9 @@ export interface ImportReport {
 
 export const api = {
   dbStatus: () =>
-    invoke<{ ok: boolean; db_path: string; tables: string[] }>("db_status"),
+    invoke<{ ok: boolean; db_path: string; tables: string[]; notice: string | null }>(
+      "db_status",
+    ),
   listProjects: () => invoke<Project[]>("list_projects"),
   createProject: (name: string) =>
     invoke<Project>("create_project", { name }),
@@ -62,10 +64,12 @@ export const api = {
       projectId,
     }),
   clusterIdentities: (projectId: number) =>
-    invoke<{ identities: number; clustered_faces: number; single_faces: number }>(
-      "cluster_identities",
-      { projectId },
-    ),
+    invoke<{
+      identities: number;
+      clustered_faces: number;
+      single_faces: number;
+      names_carried_over: number;
+    }>("cluster_identities", { projectId }),
   listIdentities: (projectId: number) =>
     invoke<Identity[]>("list_identities", { projectId }),
   identityDetail: (identityId: number) =>

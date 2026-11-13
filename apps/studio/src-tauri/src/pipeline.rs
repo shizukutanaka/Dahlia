@@ -10,9 +10,9 @@
 
 use std::path::Path;
 
-use dahlia_core::identity::cosine;
+use dahlia_core::identity::{cosine, match_previous, PreviousIdentity};
 use dahlia_core::jobs::{WorkerConfig, WorkerSession};
-use dahlia_core::storage::{Db, NewIdentity};
+use dahlia_core::storage::{Db, ReconciledIdentity};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -37,6 +37,8 @@ pub struct ClusterReport {
     pub identities: usize,
     pub clustered_faces: usize,
     pub single_faces: usize,
+    /// How many identities kept their previous (user-given) name.
+    pub names_carried_over: usize,
 }
 
 fn faces_from(resp: &Value) -> Vec<(dahlia_core::storage::NewFace, Option<Vec<f32>>)> {
@@ -185,8 +187,15 @@ pub fn cluster_identities(
         .faces_with_embeddings(project_id, EMBED_MODEL)
         .map_err(|e| e.to_string())?;
     if items.is_empty() {
-        db.replace_identities(project_id, &[]).map_err(|e| e.to_string())?;
-        return Ok(ClusterReport { identities: 0, clustered_faces: 0, single_faces: 0 });
+        // Guard (W7): with no embeddings there is nothing to cluster,
+        // and an empty result must never wipe the identities the user
+        // already has. Refuse with guidance instead of replacing.
+        return Err(
+            "特徴量がまだ取得されていないため、人物を分類できません。\
+             先に「特徴量を取得する」を実行してください\
+             （登録済みの人物データはそのまま保持されています）"
+                .into(),
+        );
     }
     let by_id: std::collections::HashMap<i64, &dahlia_core::storage::FaceEmbedding> =
         items.iter().map(|f| (f.face_id, f)).collect();
@@ -224,28 +233,60 @@ pub fn cluster_identities(
     let clustered_faces: usize = groups.iter().map(|g| g.len()).sum();
     let single_faces = noise.len();
 
-    let mut new_identities: Vec<NewIdentity> = Vec::new();
-    for (i, group) in groups.iter().enumerate() {
+    // Ordered groups with their quality scores.
+    let mut ordered: Vec<(Vec<i64>, f32)> = Vec::new();
+    for group in &groups {
         let vectors: Vec<&Vec<f32>> = group
             .iter()
             .filter_map(|id| by_id.get(id).map(|f| &f.vector))
             .collect();
-        new_identities.push(NewIdentity {
-            name: format!("人物 {}", i + 1),
-            quality_score: mean_cosine_to_centroid(&vectors),
-            face_ids: group.clone(),
-        });
+        ordered.push((group.clone(), mean_cosine_to_centroid(&vectors)));
     }
-    for (j, face_id) in noise.iter().enumerate() {
+    for face_id in &noise {
         let quality = by_id.get(face_id).map(|f| f.confidence).unwrap_or(0.0);
-        new_identities.push(NewIdentity {
-            name: format!("人物 {}", groups.len() + j + 1),
-            quality_score: quality,
-            face_ids: vec![*face_id],
-        });
+        ordered.push((vec![*face_id], quality));
     }
 
-    let total = new_identities.len();
-    db.replace_identities(project_id, &new_identities).map_err(|e| e.to_string())?;
-    Ok(ClusterReport { identities: total, clustered_faces, single_faces })
+    // Carry over (W5/W6): match the new groups to the previous
+    // identities by face-set overlap. Matched groups keep the previous
+    // identity's row (stable ID) and the name the user gave it;
+    // unmatched groups are new people and get a fresh default name.
+    let previous: Vec<PreviousIdentity> = db
+        .identities_with_faces(project_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(identity, face_ids)| PreviousIdentity {
+            id: identity.id,
+            name: identity.name,
+            face_ids,
+        })
+        .collect();
+    let group_faces: Vec<Vec<i64>> = ordered.iter().map(|(faces, _)| faces.clone()).collect();
+    let matches = match_previous(&previous, &group_faces);
+
+    let mut names_carried_over = 0usize;
+    let mut reconciled: Vec<ReconciledIdentity> = Vec::with_capacity(ordered.len());
+    for (i, (face_ids, quality_score)) in ordered.into_iter().enumerate() {
+        match matches[i] {
+            Some(pi) => {
+                names_carried_over += 1;
+                reconciled.push(ReconciledIdentity {
+                    keep_id: Some(previous[pi].id),
+                    name: previous[pi].name.clone(),
+                    quality_score,
+                    face_ids,
+                });
+            }
+            None => reconciled.push(ReconciledIdentity {
+                keep_id: None,
+                name: format!("人物 {}", i + 1),
+                quality_score,
+                face_ids,
+            }),
+        }
+    }
+
+    let total = reconciled.len();
+    db.reconcile_identities(project_id, &reconciled).map_err(|e| e.to_string())?;
+    Ok(ClusterReport { identities: total, clustered_faces, single_faces, names_carried_over })
 }

@@ -40,6 +40,8 @@ struct DbStatus {
     ok: bool,
     db_path: String,
     tables: Vec<String>,
+    /// Set when startup recovered the database from a backup.
+    notice: Option<String>,
 }
 
 #[tauri::command]
@@ -49,6 +51,7 @@ fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
         ok: true,
         db_path: state.data_dir.join("dahlia.db").to_string_lossy().into_owned(),
         tables,
+        notice: state.db.recovery_note().map(|s| s.to_string()),
     })
 }
 

@@ -23,11 +23,15 @@ function App() {
   const [view, setView] = useState<View>({ kind: "projects" });
   const [dbPath, setDbPath] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const [notice, setNotice] = useState<string>("");
 
   useEffect(() => {
     api
       .dbStatus()
-      .then((s) => setDbPath(s.db_path))
+      .then((s) => {
+        setDbPath(s.db_path);
+        if (s.notice) setNotice(s.notice);
+      })
       .catch((e) => setError(`データベースに接続できません: ${e}`));
   }, []);
 
@@ -38,6 +42,7 @@ function App() {
         <span className="subtitle">人物 Identity 管理</span>
       </header>
       {error && <div className="error">{error}</div>}
+      {notice && <div className="ok">{notice}</div>}
       {view.kind === "projects" && (
         <ProjectList onOpen={(p) => setView({ kind: "project", project: p })} />
       )}
@@ -226,7 +231,11 @@ function ProjectView({
             onClick={() =>
               run("人物の分類", () => api.clusterIdentities(project.id), (r) => {
                 loadIdentities();
-                return `分類完了: ${r.identities} 人の人物が見つかりました`;
+                const carried =
+                  r.names_carried_over > 0
+                    ? `（${r.names_carried_over} 人は前回の名前を引き継ぎました）`
+                    : "";
+                return `分類完了: ${r.identities} 人の人物が見つかりました${carried}`;
               })
             }
             disabled={!!busy || assets.length === 0}
