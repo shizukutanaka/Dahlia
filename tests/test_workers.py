@@ -260,8 +260,9 @@ class ClusteringScaleTest(unittest.TestCase):
             "        fid += 1; chunk.append({'face_id': fid, 'vector': v.tolist()})\n"
             "    w.handle({'op': 'add_items', 'items': chunk})\n"
             "r = w.handle({'op': 'cluster', 'eps': 0.68, 'min_samples': 2})\n"
+            "rss_unit = 1024**2 if sys.platform == 'darwin' else 1024\n"
             "print(json.dumps({'clusters': len(r['clusters']), 'noise': len(r['noise']),\n"
-            "                  'rss_mb': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}))\n"
+            "                  'rss_mb': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_unit}))\n"
         )
         out = subprocess.run(
             [sys.executable, "-c", script], capture_output=True, text=True, timeout=600
@@ -278,7 +279,7 @@ class ClusteringScaleTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    (ROOT / "workers" / "face" / "models" / "det_500m.onnx").exists(),
+    (ROOT / "workers" / "face" / "models" / "face_detection_yunet_2023mar.onnx").exists(),
     "face model not downloaded",
 )
 class FaceWorkerTest(unittest.TestCase):
@@ -290,6 +291,8 @@ class FaceWorkerTest(unittest.TestCase):
         self.assertGreater(faces[0]["confidence"], 0.5)
         x, y, w, h = faces[0]["bbox"]
         self.assertTrue(w > 50 and h > 50 and x >= 0 and y >= 0)
+        self.assertEqual(np.shape(faces[0]["landmarks"]), (5, 2))
+        self.assertTrue(np.isfinite(faces[0]["landmarks"]).all())
 
         faces = face_worker.detect(str(ROOT / "tests" / "samples" / "landscape.jpg"))
         self.assertEqual(faces, [])

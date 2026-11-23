@@ -190,7 +190,7 @@ class HeifConvertScriptTest(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_HEIF, "pillow-heif not installed")
 @unittest.skipUnless(
-    (ROOT / "workers" / "face" / "models" / "det_500m.onnx").exists(),
+    (ROOT / "workers" / "face" / "models" / "face_detection_yunet_2023mar.onnx").exists(),
     "face model not downloaded",
 )
 class HeicFaceWorkerTest(unittest.TestCase):

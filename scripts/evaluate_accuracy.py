@@ -16,7 +16,7 @@ Three parts:
   C. Synthetic clustering quality: generated embeddings with known
      ground truth, calibrated so the within-person cosine distance
      matches a target difficulty (0.30 easy / 0.45 typical /
-     0.60 hard - the real cross-age sample pair measures 0.65).
+     0.60 hard).
      Reports pairwise precision/recall/F1 and purity at the
      production eps, plus an eps sweep showing where the
      production value sits relative to the quality plateau.
@@ -31,10 +31,8 @@ Usage:
 
 Exit code is 0 when every gate passes, 1 otherwise, so the script
 can gate a model swap or a threshold change. Production settings
-are read from the sources of truth: eps/min_samples defaults in
-workers/clustering/worker.py and CLUSTER_EPS in pipeline.rs is
-documented to match; if they ever drift, part B/C evaluate the
-worker defaults and the drift is visible in the report header.
+use the clustering worker's default eps, which must match CLUSTER_EPS
+in pipeline.rs.
 """
 import argparse
 import importlib.util
@@ -62,7 +60,7 @@ clustering_worker = _load("clustering_worker", ROOT / "workers" / "clustering" /
 
 # Production clustering parameters (defaults of the clustering
 # worker's handle(); pipeline.rs CLUSTER_EPS carries the same eps).
-PROD_EPS = 0.68
+PROD_EPS = clustering_worker.DEFAULT_EPS
 PROD_MIN_SAMPLES = 2
 
 SAMPLES = ROOT / "tests" / "samples"
@@ -78,7 +76,7 @@ OTHER_PERSON = "curie_a.jpg"
 
 DIM = 512
 LEVELS = {"easy": 0.30, "typical": 0.45, "hard": 0.60}
-SWEEP_EPS = [0.40, 0.50, 0.55, 0.60, 0.65, 0.68, 0.72, 0.76, 0.80, 0.85, 0.90]
+SWEEP_EPS = sorted({0.40, 0.50, 0.55, 0.60, 0.65, 0.68, 0.72, 0.76, 0.80, 0.85, 0.90, PROD_EPS})
 
 
 # ------------------------------------------------------------------
@@ -172,8 +170,8 @@ def cluster(items, eps, min_samples=PROD_MIN_SAMPLES):
 
 def models_present() -> bool:
     return (
-        (ROOT / "workers" / "face" / "models" / "det_500m.onnx").exists()
-        and (ROOT / "workers" / "embedding" / "models" / "w600k_mbf.onnx").exists()
+        (ROOT / "workers" / "face" / "models" / "face_detection_yunet_2023mar.onnx").exists()
+        and (ROOT / "workers" / "embedding" / "models" / "face_recognition_sface_2021dec.onnx").exists()
     )
 
 
@@ -307,7 +305,7 @@ def main() -> int:
     if not args.skip_models:
         if not models_present():
             print("models not present: run with --skip-models, or place "
-                  "det_500m.onnx / w600k_mbf.onnx in the workers' models/")
+                  "face_detection_yunet_2023mar.onnx / face_recognition_sface_2021dec.onnx in the workers' models/")
             return 1
         face_worker = _load("face_worker", ROOT / "workers" / "face" / "worker.py")
         embedding_worker = _load("embedding_worker", ROOT / "workers" / "embedding" / "worker.py")

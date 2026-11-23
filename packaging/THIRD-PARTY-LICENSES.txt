@@ -3,7 +3,19 @@ Dahlia - 同梱コンポーネントのライセンス
 
 このファイルは、配布物に同梱される第三者コンポーネントのうち、
 ライセンスの記録が必要なものの一覧です。各ライセンスの全文は、
-パッケージ内の配布物そのものに含まれています（下記の所在を参照）。
+パッケージ内に含まれています（下記の所在を参照）。
+
+■ 顔検出・特徴量モデル (OpenCV Zoo)
+
+  - YuNet (face_detection_yunet_2023mar.onnx)
+    ライセンス: MIT (Copyright (c) 2020 Shiqi Yu)
+    全文: LICENSE-YuNet.txt
+    出典: https://github.com/opencv/opencv_zoo/tree/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_detection_yunet
+
+  - SFace (face_recognition_sface_2021dec.onnx)
+    ライセンス: Apache-2.0
+    全文: LICENSE-SFace.txt
+    出典: https://github.com/opencv/opencv_zoo/tree/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_recognition_sface
 
 ■ HEIC/HEIF 対応 (W87) — pillow-heif 1.8.1 とその同梱ライブラリ
 

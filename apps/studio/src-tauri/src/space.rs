@@ -1,6 +1,6 @@
 //! Built-in 3D Identity Space.
 //!
-//! Positions come from the "space" Python worker (PCA over the 512-d
+//! Positions come from the "space" Python worker (PCA over the 128-d
 //! face embeddings); identity assignment and asset paths come from
 //! storage. Depth maps for the relief view are generated on demand by
 //! the same worker when a Depth Anything V2 model is installed.

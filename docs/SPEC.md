@@ -22,9 +22,11 @@ Dahlia は、ローカル環境で人物 Identity を管理する AI クリエ�
 - SQLite（保存）
 - Python AI ワーカー（JSON Lines プロトコル、workers/README.md）
 - ONNX Runtime（推論）
-- 顔検出: SCRFD / RetinaFace 系
-- 特徴量: ArcFace 系
+- 顔検出: OpenCV Zoo YuNet（MIT）
+- 特徴量: OpenCV Zoo SFace（Apache-2.0、128 次元）
 - クラスタリング: DBSCAN
+
+0.5.0 で再配布可能なモデルへの切り替えのため、顔検出と特徴量のモデルを変更した。
 
 ## アーキテクチャ規則
 

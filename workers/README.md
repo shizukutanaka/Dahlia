@@ -26,8 +26,8 @@ Rust 側の監督 (core/jobs): ワーカーが一定時間（既定300秒、
               作業コピー (プロキシ) を作り、サムネイルと顔の切り抜きを
               そこから作る。Rust 側 (src-tauri の heif.rs) が
               SRC/DST の組を引数に一括で呼ぶ。
-- face/       顔検出 (SCRFD, ONNX)
-- embedding/  顔特徴量 (ArcFace系, ONNX)
+- face/       顔検出 (YuNet, ONNX、bbox + 5 ランドマーク)
+- embedding/  顔特徴量 (SFace, ONNX、128 floats)
 - clustering/ DBSCAN による同一人物クラスタリング
               大量の顔は `{"op": "add_items", "items": [...]}` を
               繰り返してから `{"op": "cluster", ...}` で分類する

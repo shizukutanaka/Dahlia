@@ -2,7 +2,7 @@
 """Clustering worker: DBSCAN over face embeddings (cosine distance).
 
 Requests:
-  {"items": [...], "eps": 0.68, "min_samples": 2}
+  {"items": [...], "eps": 0.62, "min_samples": 2}
       One-shot clustering (original form).
   {"op": "add_items", "items": [...]}
       Accumulate items in the session; answered with {"total": n}.
@@ -10,7 +10,7 @@ Requests:
       instead of one giant JSON line (W22). Items are converted to
       a float64 array on arrival so the session does not hold the
       far heavier JSON/list representation.
-  {"op": "cluster", "eps": 0.68, "min_samples": 2}
+  {"op": "cluster", "eps": 0.62, "min_samples": 2}
       Cluster everything accumulated so far (and clear it).
   {"op": "clear"}
       Drop accumulated items without clustering.
@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+DEFAULT_EPS = 0.62
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import report_progress, run_loop  # noqa: E402
@@ -150,7 +152,7 @@ def handle(req: dict) -> dict:
         _pending_ids.clear()
         _pending_vecs.clear()
         return {"total": 0}
-    eps = float(req.get("eps", 0.68))  # tuned on tests/samples: same-person distance 0.65, different >= 0.85
+    eps = float(req.get("eps", DEFAULT_EPS))
     min_samples = int(req.get("min_samples", 2))
     if op == "cluster":
         # Take the accumulated items; the buffer is cleared either

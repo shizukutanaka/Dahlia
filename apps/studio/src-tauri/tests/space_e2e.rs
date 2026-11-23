@@ -20,7 +20,7 @@ fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
 fn identity_space_on_samples() {
     let root = repo_root();
     let python = root.join(".venv/bin/python");
-    if !python.exists() || !root.join("workers/face/models/det_500m.onnx").exists() {
+    if !python.exists() || !root.join("workers/face/models/face_detection_yunet_2023mar.onnx").exists() {
         eprintln!("skipping: venv or models not present");
         return;
     }
