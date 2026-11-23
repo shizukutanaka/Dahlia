@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Face embedding worker (ArcFace family, ONNX Runtime).
+"""Face embedding worker (SFace, ONNX Runtime).
 
 Request : {"image": "/path/to/photo.jpg"}
-Response: {"model": "arcface-mbf",
+Response: {"model": "sface-2021dec",
            "faces": [{"bbox": [...], "confidence": 0.98,
-                      "embedding": [512 floats]}, ...]}
+                      "embedding": [128 floats]}, ...]}
 
-The worker re-runs SCRFD detection internally to obtain the 5-point
+The worker re-runs YuNet detection internally to obtain the 5-point
 landmarks needed for alignment (the database intentionally stores
 only bbox + confidence). Faces are returned in detection order, so
 callers can match them to stored faces by bbox proximity.
 
-Model file: models/w600k_mbf.onnx next to this script (or
+Model file: models/face_recognition_sface_2021dec.onnx next to this script (or
 DAHLIA_EMBED_MODEL).
 """
 import os
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "face"))
 from common import load_image_rgb, run_loop  # noqa: E402
 import worker as face_worker  # workers/face/worker.py  # noqa: E402
 
-MODEL_NAME = "arcface-mbf"
+MODEL_NAME = "sface-2021dec"
 SIZE = 112
 # ArcFace reference landmarks for a 112x112 aligned crop.
 TEMPLATE = np.array(
@@ -49,7 +49,7 @@ def session():
         import onnxruntime as ort
 
         model = os.environ.get("DAHLIA_EMBED_MODEL") or str(
-            Path(__file__).resolve().parent / "models" / "w600k_mbf.onnx"
+            Path(__file__).resolve().parent / "models" / "face_recognition_sface_2021dec.onnx"
         )
         if not Path(model).exists():
             raise FileNotFoundError(f"embedding model not found: {model}")
@@ -95,7 +95,7 @@ def embed(image_path: str) -> list[dict]:
         mat = _similarity_transform(landmarks, TEMPLATE)
         crop = _warp_affine(img, mat)
         arr = np.asarray(crop).astype(np.float32)
-        blob = np.transpose((arr - 127.5) / 127.5, (2, 0, 1))[None, ...]
+        blob = arr.transpose(2, 0, 1)[None, ...]
         vec = sess.run(None, {input_name: blob})[0].reshape(-1).astype(np.float64)
         vec /= np.linalg.norm(vec) + 1e-12
         out.append(

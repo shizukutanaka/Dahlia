@@ -1,3 +1,17 @@
+The portable package includes the following unmodified OpenCV Zoo models.
+Paths are relative to the Dahlia package root. See THIRD-PARTY-LICENSES.txt
+in the package root for the license texts.
+
+YuNet face detector (MIT)
+  workers/face/models/face_detection_yunet_2023mar.onnx
+  Download: https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+  SHA-256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+
+SFace face embedding model (Apache-2.0)
+  workers/embedding/models/face_recognition_sface_2021dec.onnx
+  Download: https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
+  SHA-256: 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
+
 Optional: place depth-anything-v2-small.onnx in this folder to enable
 the AI depth relief in the 3D space view. Without it, everything else
 works and that one feature shows an explanation instead.

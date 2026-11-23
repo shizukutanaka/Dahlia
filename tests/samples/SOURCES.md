@@ -12,5 +12,4 @@ fixtures for face detection / embedding / clustering verification.
 
 Expected results: one face in each portrait, none in the landscape;
 the two Einstein photos cluster into one identity, Curie forms her
-own (same-person cosine ~0.35 for this cross-age pair with the small
-ArcFace model; different-person <= ~0.15).
+own. See docs/EVALUATION.md for the measured SFace cosine distances.

@@ -16,6 +16,12 @@
 #                facemesh component). This is the `python/` folder
 #                of a previous portable package.
 #
+# Models (place the official OpenCV Zoo files here before running):
+#   workers/face/models/face_detection_yunet_2023mar.onnx
+#   https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+#   workers/embedding/models/face_recognition_sface_2021dec.onnx
+#   https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
+#
 # Optional:
 #   DEPTH_MODEL  depth-anything-v2-small.onnx to bundle AI depth.
 #   OUT_DIR      Output directory (default: build/portable).
@@ -33,6 +39,26 @@ cd "$(dirname "$0")/.."
 VERSION=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' apps/studio/src-tauri/tauri.conf.json | head -1)
 OUT_DIR=${OUT_DIR:-build/portable}
 PKG="$OUT_DIR/Dahlia"
+FACE_MODEL=workers/face/models/face_detection_yunet_2023mar.onnx
+EMBED_MODEL=workers/embedding/models/face_recognition_sface_2021dec.onnx
+
+verify_model() {
+    if [ ! -f "$1" ]; then
+        echo "missing model: $1 (see README.md)" >&2
+        exit 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$1")
+    else
+        actual=$(shasum -a 256 "$1")
+    fi
+    if [ "${actual%% *}" != "$2" ]; then
+        echo "SHA-256 mismatch for $1" >&2
+        exit 1
+    fi
+}
+verify_model "$FACE_MODEL" 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+verify_model "$EMBED_MODEL" 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
 
 rm -rf "$PKG"
 mkdir -p "$PKG"
@@ -46,7 +72,7 @@ fi
 
 # Launcher, readme, self-check (templates live in packaging/).
 cp packaging/Dahlia.bat packaging/README.txt packaging/check_env.py "$PKG/"
-cp packaging/THIRD-PARTY-LICENSES.txt "$PKG/"
+cp LICENSE packaging/THIRD-PARTY-LICENSES.txt packaging/LICENSE-YuNet.txt packaging/LICENSE-SFace.txt "$PKG/"
 
 # Workers: code, docs and the bundled ONNX models. __pycache__ and
 # the dev venv never ship.
@@ -55,15 +81,14 @@ for w in face embedding clustering space facemesh; do
     mkdir -p "$PKG/workers/$w"
     cp workers/$w/worker.py "$PKG/workers/$w/"
     # Extra data files a worker ships next to its code (facemesh's
-    # canonical tessellation) and its models of any format (.onnx,
-    # MediaPipe .task).
+    # canonical tessellation).
     for extra in workers/$w/*.json; do
         [ -f "$extra" ] && cp "$extra" "$PKG/workers/$w/"
     done
-    if [ -d "workers/$w/models" ]; then
-        mkdir -p "$PKG/workers/$w/models"
-        cp workers/$w/models/* "$PKG/workers/$w/models/"
-    fi
+done
+for model in "$FACE_MODEL" "$EMBED_MODEL" workers/facemesh/models/face_landmarker.task; do
+    mkdir -p "$PKG/$(dirname "$model")"
+    cp "$model" "$PKG/$model"
 done
 cp workers/common.py workers/heif_convert.py workers/README.md "$PKG/workers/"
 
@@ -80,13 +105,12 @@ fi
 # and the app look for must be present.
 missing=0
 for f in studio.exe Dahlia.bat README.txt check_env.py \
-         THIRD-PARTY-LICENSES.txt \
+         LICENSE THIRD-PARTY-LICENSES.txt LICENSE-YuNet.txt LICENSE-SFace.txt \
          workers/face/worker.py workers/embedding/worker.py \
          workers/clustering/worker.py workers/space/worker.py \
          workers/facemesh/worker.py workers/common.py \
          workers/heif_convert.py \
-         workers/face/models/det_500m.onnx \
-         workers/embedding/models/w600k_mbf.onnx \
+         "$FACE_MODEL" "$EMBED_MODEL" \
          workers/facemesh/models/face_landmarker.task \
          workers/facemesh/tessellation.json \
          python/python.exe models/README.txt; do

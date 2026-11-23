@@ -34,10 +34,25 @@ npm run tauri dev
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install onnxruntime pillow numpy pillow-heif
-# モデル配置: workers/face/models/det_500m.onnx (SCRFD)
-#             workers/embedding/models/w600k_mbf.onnx (ArcFace)
-# 出典: InsightFace buffalo_s パック
+mkdir -p workers/face/models workers/embedding/models
+curl -fL 'https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_detection_yunet/face_detection_yunet_2023mar.onnx' \
+  -o workers/face/models/face_detection_yunet_2023mar.onnx
+curl -fL 'https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_recognition_sface/face_recognition_sface_2021dec.onnx' \
+  -o workers/embedding/models/face_recognition_sface_2021dec.onnx
 ```
+
+モデルは OpenCV Zoo 配布の YuNet (MIT) と SFace (Apache-2.0) です。
+SHA-256（ポータブル版の組み立て時にも検証します）:
+
+| モデル | SHA-256 |
+| --- | --- |
+| YuNet | `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` |
+| SFace | `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79` |
+
+**0.5.0 への更新:** 旧版の ArcFace 特徴量は SFace と互換性がなく、混在しません。
+既存プロジェクトで「特徴量を取得する」を実行して SFace の特徴量を作り直し、
+「人物を分類する」を実行してください。顔検出結果も YuNet に更新したい場合は、
+先に「全件を再検出」を実行してください。この操作は取得済み特徴量を消去します。
 
 アプリ実行時は環境変数でワーカーを指定できます（未指定時は実行ファイル/カレント配下の `workers/` を自動探索）:
 

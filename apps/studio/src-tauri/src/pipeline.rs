@@ -16,8 +16,8 @@ use dahlia_core::storage::{Db, ReconciledIdentity};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-pub const EMBED_MODEL: &str = "arcface-mbf";
-const CLUSTER_EPS: f64 = 0.68; // cosine distance; tuned on tests/samples
+pub const EMBED_MODEL: &str = "sface-2021dec";
+const CLUSTER_EPS: f64 = 0.62; // SFace cosine distance; see docs/EVALUATION.md
 /// Faces sent to the clustering worker per add_items request (W22).
 const CLUSTER_CHUNK: usize = 500;
 

@@ -18,7 +18,7 @@ fn repo_root() -> std::path::PathBuf {
 fn heic_photo_imports_detects_and_crops() {
     let root = repo_root();
     let python = root.join(".venv/bin/python");
-    let face_model = root.join("workers/face/models/det_500m.onnx");
+    let face_model = root.join("workers/face/models/face_detection_yunet_2023mar.onnx");
     if !python.exists() || !face_model.exists() {
         eprintln!("skipping: venv or models not present");
         return;
