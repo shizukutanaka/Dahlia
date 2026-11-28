@@ -144,6 +144,7 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         Self::init(&conn)?;
+        crate::owner_only_file(path)?;
         Ok(Self { conn: Mutex::new(conn), recovery_note })
     }
 
@@ -225,17 +226,32 @@ impl Db {
     /// prevent the app from starting.
     fn create_backup(db_path: &Path) {
         let Some(dir) = Self::backups_dir(db_path) else { return };
-        if std::fs::create_dir_all(&dir).is_err() {
+        if std::fs::create_dir_all(&dir).is_err() || crate::owner_only_dir(&dir).is_err() {
             return;
         }
         let secs = unix_secs();
         let mut dest = dir.join(format!("dahlia-{secs}.db"));
         let mut n = 1;
-        while dest.exists() {
-            dest = dir.join(format!("dahlia-{secs}-{n}.db"));
-            n += 1;
+        let created = loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+                Ok(file) => break file,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    dest = dir.join(format!("dahlia-{secs}-{n}.db"));
+                    n += 1;
+                }
+                Err(_) => return,
+            }
+        };
+        if crate::owner_only_file(&dest).is_err() {
+            drop(created);
+            let _ = std::fs::remove_file(&dest);
+            return;
         }
-        let Ok(conn) = Connection::open(db_path) else { return };
+        drop(created);
+        let Ok(conn) = Connection::open(db_path) else {
+            let _ = std::fs::remove_file(&dest);
+            return;
+        };
         // VACUUM INTO writes a consistent copy even if the source is
         // mid-journal; the path is app-controlled, quotes escaped.
         let sql = format!(
@@ -243,6 +259,11 @@ impl Db {
             dest.to_string_lossy().replace('\'', "''")
         );
         if conn.execute_batch(&sql).is_err() {
+            let _ = std::fs::remove_file(&dest);
+            return;
+        }
+        if crate::owner_only_file(&dest).is_err() {
+            let _ = std::fs::remove_file(&dest);
             return;
         }
         // Rotate: keep the newest MAX_BACKUPS generations.
@@ -260,6 +281,9 @@ impl Db {
             })
             .unwrap_or_default();
         files.sort();
+        for file in &files {
+            let _ = crate::owner_only_file(file);
+        }
         while files.len() > MAX_BACKUPS {
             let _ = std::fs::remove_file(files.remove(0));
         }
@@ -267,6 +291,7 @@ impl Db {
 
     fn newest_valid_backup(db_path: &Path) -> Option<std::path::PathBuf> {
         let dir = Self::backups_dir(db_path)?;
+        let _ = crate::owner_only_dir(&dir);
         let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
             .ok()?
             .flatten()
@@ -279,6 +304,9 @@ impl Db {
             })
             .collect();
         files.sort();
+        for file in &files {
+            let _ = crate::owner_only_file(file);
+        }
         files.iter().rev().find(|p| Self::file_integrity_ok(p)).cloned()
     }
 
@@ -301,11 +329,13 @@ impl Db {
         };
         let preserved = path.with_extension(format!("corrupt-{}.db", unix_secs()));
         let _ = std::fs::rename(path, &preserved);
+        let _ = crate::owner_only_file(&preserved);
         for suffix in ["-journal", "-wal", "-shm"] {
             let side = format!("{}{}", path.to_string_lossy(), suffix);
             let _ = std::fs::remove_file(side);
         }
         std::fs::copy(&backup, path)?;
+        crate::owner_only_file(path)?;
         let name = backup
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1136,6 +1166,36 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".db"))
             .count();
         assert_eq!(count, 1, "one startup backup expected");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_and_backup_are_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode_of = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let path = temp_db_path("private");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        {
+            let db = Db::open(&path).unwrap();
+            db.create_project("Private").unwrap();
+        }
+        assert_eq!(mode_of(&path), 0o600, "database file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        {
+            let _db = Db::open(&path).unwrap();
+        }
+        assert_eq!(mode_of(&path), 0o600, "existing database file");
+        let backups = path.parent().unwrap().join("backups");
+        assert_eq!(mode_of(&backups), 0o700, "backup directory");
+        let backup = std::fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("db"))
+            .unwrap();
+        assert_eq!(mode_of(&backup), 0o600, "backup file");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -460,6 +460,7 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            dahlia_core::owner_only_dir(&data_dir)?;
             // Diagnostic log (local file only, never sent anywhere).
             dahlia_core::logging::init(&data_dir.join("logs").join("dahlia.log"));
             dahlia_core::logging::info("Dahlia を起動しました");
